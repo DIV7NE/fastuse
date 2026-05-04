@@ -9,3 +9,10 @@ publish.workspace = true
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+schemars = { version = "1.0", optional = true }
+
+[features]
+default = []
+# Enables JsonSchema derives on the wire types so fastuse-mcp can publish
+# MCP tool input schemas without re-declaring them.
+schema = ["dep:schemars"]

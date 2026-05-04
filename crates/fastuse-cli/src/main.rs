@@ -1,5 +1,6 @@
 //! fastuse-cli — local helper CLI for the daemon.
 
+mod cmd_phase2;
 mod cmd_ping;
 mod cmd_start;
 mod cmd_status;
@@ -35,6 +36,150 @@ enum Cmd {
     Stop,
     /// Print daemon status (sentinel + 50ms ping probe).
     Status,
+
+    // ----- Phase 2: input -----
+    /// Click at physical-pixel coordinates.
+    Click {
+        /// Target x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Target y in physical pixels (virtual-desktop origin).
+        y: i32,
+        /// Mouse button: left | right | middle.
+        #[arg(long, default_value = "left")]
+        button: String,
+        /// Number of click cycles (e.g. 2 = double-click).
+        #[arg(long, default_value_t = 1)]
+        count: u8,
+        /// Comma-separated modifier list, e.g. `ctrl,shift`.
+        #[arg(long)]
+        mods: Option<String>,
+        /// Skip the implicit SetCursorPos pre-move.
+        #[arg(long, default_value_t = false)]
+        no_cursor: bool,
+    },
+    /// Type literal Unicode text.
+    Type {
+        /// Text to type. Wrapped in Redact<> end-to-end (D-10).
+        text: String,
+    },
+    /// Press a chord (e.g. ctrl+s).
+    Key {
+        /// Chord to press.
+        chord: String,
+        /// Number of full DOWN/UP cycles for the primary key.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+    },
+    /// Press a chord and hold for --ms milliseconds.
+    HoldKey {
+        /// Chord to press.
+        chord: String,
+        /// Hold duration.
+        #[arg(long)]
+        ms: u32,
+    },
+    /// Move the cursor.
+    MouseMove {
+        /// Target x in physical pixels.
+        x: i32,
+        /// Target y in physical pixels.
+        y: i32,
+    },
+    /// Mouse-button DOWN at the current cursor position.
+    MouseDown {
+        /// Button: left | right | middle.
+        #[arg(long, default_value = "left")]
+        button: String,
+    },
+    /// Mouse-button UP at the current cursor position.
+    MouseUp {
+        /// Button: left | right | middle.
+        #[arg(long, default_value = "left")]
+        button: String,
+    },
+    /// Click-and-drag from start to end.
+    Drag {
+        /// Drag start x.
+        sx: i32,
+        /// Drag start y.
+        sy: i32,
+        /// Drag end x.
+        ex: i32,
+        /// Drag end y.
+        ey: i32,
+        /// Button held during drag.
+        #[arg(long, default_value = "left")]
+        button: String,
+        /// Modifiers held during drag.
+        #[arg(long)]
+        mods: Option<String>,
+    },
+    /// Scroll at coords.
+    Scroll {
+        /// Target x in physical pixels.
+        x: i32,
+        /// Target y in physical pixels.
+        y: i32,
+        /// Direction: up | down | left | right.
+        #[arg(long)]
+        dir: String,
+        /// Wheel notch count.
+        #[arg(long, default_value_t = 3)]
+        amount: i32,
+        /// Modifiers held during scroll.
+        #[arg(long)]
+        mods: Option<String>,
+    },
+    /// Server-side sleep.
+    Wait {
+        /// Sleep duration in milliseconds.
+        #[arg(long)]
+        ms: u32,
+    },
+
+    // ----- Phase 2: window/monitor -----
+    /// List display monitors.
+    ListMonitors,
+    /// Read the current cursor position.
+    CursorPosition,
+    /// Print the foreground window's WindowInfo.
+    ForegroundWindow,
+    /// Enumerate top-level windows.
+    ListWindows {
+        /// Filter by process basename substring (case-insensitive).
+        #[arg(long)]
+        process: Option<String>,
+        /// Filter by title substring (case-insensitive).
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Bring the given HWND to the foreground.
+    FocusWindow {
+        /// HWND as decimal or 0x-prefixed hex.
+        hwnd: String,
+    },
+    /// Move + resize a window.
+    ResizeMoveWindow {
+        /// HWND as decimal or 0x-prefixed hex.
+        hwnd: String,
+        /// New top-left x in physical pixels.
+        x: i32,
+        /// New top-left y in physical pixels.
+        y: i32,
+        /// New width in physical pixels.
+        w: i32,
+        /// New height in physical pixels.
+        h: i32,
+    },
+}
+
+fn parse_hwnd(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Ok(u64::from_str_radix(hex, 16)?)
+    } else {
+        Ok(s.parse::<u64>()?)
+    }
 }
 
 fn main() {
@@ -60,6 +205,32 @@ fn main() {
             Cmd::Start => cmd_start::run(&identity.path).await,
             Cmd::Stop => cmd_stop::run(&identity.path).await,
             Cmd::Status => cmd_status::run(&identity.path).await,
+            Cmd::Click { x, y, button, count, mods, no_cursor } =>
+                cmd_phase2::click(&identity.path, x, y, &button, count, mods.as_deref(), no_cursor).await,
+            Cmd::Type { text } => cmd_phase2::r#type(&identity.path, text).await,
+            Cmd::Key { chord, repeat } => cmd_phase2::key(&identity.path, chord, repeat).await,
+            Cmd::HoldKey { chord, ms } => cmd_phase2::hold_key(&identity.path, chord, ms).await,
+            Cmd::MouseMove { x, y } => cmd_phase2::mouse_move(&identity.path, x, y).await,
+            Cmd::MouseDown { button } => cmd_phase2::mouse_down(&identity.path, &button).await,
+            Cmd::MouseUp { button } => cmd_phase2::mouse_up(&identity.path, &button).await,
+            Cmd::Drag { sx, sy, ex, ey, button, mods } =>
+                cmd_phase2::drag(&identity.path, sx, sy, ex, ey, &button, mods.as_deref()).await,
+            Cmd::Scroll { x, y, dir, amount, mods } =>
+                cmd_phase2::scroll(&identity.path, x, y, &dir, amount, mods.as_deref()).await,
+            Cmd::Wait { ms } => cmd_phase2::wait(&identity.path, ms).await,
+            Cmd::ListMonitors => cmd_phase2::list_monitors(&identity.path).await,
+            Cmd::CursorPosition => cmd_phase2::cursor_position(&identity.path).await,
+            Cmd::ForegroundWindow => cmd_phase2::foreground_window(&identity.path).await,
+            Cmd::ListWindows { process, title } =>
+                cmd_phase2::list_windows(&identity.path, process, title).await,
+            Cmd::FocusWindow { hwnd } => {
+                let h = parse_hwnd(&hwnd)?;
+                cmd_phase2::focus_window(&identity.path, h).await
+            }
+            Cmd::ResizeMoveWindow { hwnd, x, y, w, h } => {
+                let hw = parse_hwnd(&hwnd)?;
+                cmd_phase2::resize_move_window(&identity.path, hw, x, y, w, h).await
+            }
         }
     });
 

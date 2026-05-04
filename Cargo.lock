@@ -380,6 +380,7 @@ dependencies = [
  "postcard",
  "scopeguard",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -414,6 +415,7 @@ name = "fastuse-proto"
 version = "0.1.0"
 dependencies = [
  "postcard",
+ "schemars",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -425,6 +427,8 @@ dependencies = [
  "fastuse-core",
  "fastuse-proto",
  "once_cell",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "uiautomation",

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Axis-aligned rectangle in physical pixels, virtual-desktop space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Rect {
     /// Top-left x in physical pixels (virtual-desktop origin).
     pub x: i32,
@@ -30,6 +31,7 @@ impl Rect {
 
 /// Mouse button identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum MouseButton {
     /// Primary (left) mouse button.
     Left,
@@ -41,6 +43,7 @@ pub enum MouseButton {
 
 /// Scroll direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ScrollDirection {
     /// Wheel up (positive vertical).
     Up,
@@ -54,6 +57,7 @@ pub enum ScrollDirection {
 
 /// Information about a single display monitor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MonitorInfo {
     /// Opaque HMONITOR cast to `u64`.
     pub id: u64,
@@ -69,6 +73,7 @@ pub struct MonitorInfo {
 
 /// Information about a single top-level window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WindowInfo {
     /// Opaque HWND cast to `u64`.
     pub hwnd: u64,

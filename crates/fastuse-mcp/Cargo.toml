@@ -10,7 +10,7 @@ name = "fastuse-mcp"
 path = "src/main.rs"
 
 [dependencies]
-fastuse-proto = { path = "../fastuse-proto" }
+fastuse-proto = { path = "../fastuse-proto", features = ["schema"] }
 fastuse-core = { path = "../fastuse-core" }
 fastuse-win = { path = "../fastuse-win" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

@@ -83,14 +83,29 @@ fn main() {
 
     increment_mta_once();
 
+    // Initialize UIPI integrity-level cache before any input dispatches.
+    fastuse_win::input::uipi::init_our_integrity_level();
+
     // Spawn fastuse-win worker threads. Held for daemon lifetime.
     let input = match fastuse_win::input_thread::spawn_input_thread() {
-        Ok(h) => Some(h),
+        Ok(h) => Some(std::sync::Arc::new(h)),
         Err(e) => {
             tracing::error!(error = %e, "failed to spawn input thread");
             None
         }
     };
+
+    // Phase 2: panic hook flushes held modifiers via the input thread channel.
+    {
+        let input_for_panic = input.clone();
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(h) = input_for_panic.as_ref() {
+                let _ = h.send(fastuse_win::input_thread::InputJob::FlushHeldModifiers);
+            }
+            prev(info);
+        }));
+    }
     let uia = match fastuse_win::uia_pool::spawn_uia_pool(3) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -122,7 +137,7 @@ fn main() {
     let server_result = rt.block_on(async {
         server::serve(
             identity.path.clone(),
-            input.as_ref(),
+            input.clone(),
             uia.as_ref(),
             capture.as_ref(),
             args.idle_timeout,

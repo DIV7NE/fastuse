@@ -20,14 +20,38 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Job sent to the input thread.
-#[derive(Debug)]
 pub enum InputJob {
-    /// No-op probe; replies `Ok(())`.
+    /// No-op probe; replies `Ack`.
     Noop,
+    /// Phase 2 inline closure-style job. `Box<dyn FnOnce>` so the thread can
+    /// run handler-specific logic without re-encoding every Phase 2 variant
+    /// here. Reply payload is `serde_json::Value` to keep the channel
+    /// mono-typed; callers decode back to their concrete Response variant.
+    Run(Box<dyn FnOnce() -> Result<serde_json::Value, fastuse_proto::Error> + Send>),
+    /// Flush all currently-held modifiers (panic-hook / connection-drop).
+    FlushHeldModifiers,
+}
+
+impl std::fmt::Debug for InputJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InputJob::Noop => write!(f, "InputJob::Noop"),
+            InputJob::Run(_) => write!(f, "InputJob::Run(<fn>)"),
+            InputJob::FlushHeldModifiers => write!(f, "InputJob::FlushHeldModifiers"),
+        }
+    }
+}
+
+/// Reply payload from the input thread.
+pub enum InputReplyPayload {
+    /// Result of a Run job carrying back a JSON value (or proto error).
+    Run(Result<serde_json::Value, fastuse_proto::Error>),
+    /// Plain ack for Noop / FlushHeldModifiers.
+    Ack,
 }
 
 /// Reply channel paired with each [`InputJob`].
-pub type InputReply = mpsc::Sender<Result<(), InputThreadError>>;
+pub type InputReply = mpsc::Sender<InputReplyPayload>;
 
 /// Errors raised by the input thread.
 #[derive(Debug, thiserror::Error)]
@@ -46,20 +70,60 @@ pub struct InputThreadHandle {
 }
 
 impl InputThreadHandle {
-    /// Send a job to the input thread; blocks for the reply.
+    /// Send a job to the input thread; blocks for the reply. Phase 1
+    /// preserved this signature for the Noop probe and the new
+    /// FlushHeldModifiers variant.
     pub fn send(&self, job: InputJob) -> Result<(), InputThreadError> {
+        match self.send_payload(job)? {
+            InputReplyPayload::Ack => Ok(()),
+            InputReplyPayload::Run(_) => Ok(()),
+        }
+    }
+
+    /// Phase 2: send a Run job and return the payload. Caller decodes.
+    pub fn run<F, T>(&self, f: F) -> Result<T, fastuse_proto::Error>
+    where
+        F: FnOnce() -> Result<T, fastuse_proto::Error> + Send + 'static,
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let job = InputJob::Run(Box::new(move || {
+            f().and_then(|v| {
+                serde_json::to_value(&v).map_err(|e| fastuse_proto::Error::new(
+                    fastuse_proto::ErrorCode::Internal,
+                    format!("encode reply: {e}"),
+                ))
+            })
+        }));
+        match self.send_payload(job).map_err(|_| fastuse_proto::Error::new(
+            fastuse_proto::ErrorCode::DaemonDead,
+            "input thread shut down".to_string(),
+        ))? {
+            InputReplyPayload::Run(r) => {
+                let v = r?;
+                serde_json::from_value(v).map_err(|e| fastuse_proto::Error::new(
+                    fastuse_proto::ErrorCode::Internal,
+                    format!("decode reply: {e}"),
+                ))
+            }
+            InputReplyPayload::Ack => Err(fastuse_proto::Error::new(
+                fastuse_proto::ErrorCode::Internal,
+                "expected Run reply, got Ack".to_string(),
+            )),
+        }
+    }
+
+    fn send_payload(&self, job: InputJob) -> Result<InputReplyPayload, InputThreadError> {
         let (tx, rx) = mpsc::channel();
         self.sender
             .as_ref()
             .ok_or(InputThreadError::ShutDown)?
             .send((job, tx))
             .map_err(|_| InputThreadError::ShutDown)?;
-        // Wake the message pump so it polls the channel.
         // SAFETY: posting WM_USER to our owned thread is safe.
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_USER, WPARAM(0), LPARAM(0));
         }
-        rx.recv().map_err(|_| InputThreadError::ShutDown)?
+        rx.recv().map_err(|_| InputThreadError::ShutDown)
     }
 }
 
@@ -73,6 +137,17 @@ impl Drop for InputThreadHandle {
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+    }
+}
+
+fn run_job(job: InputJob) -> InputReplyPayload {
+    match job {
+        InputJob::Noop => InputReplyPayload::Ack,
+        InputJob::Run(f) => InputReplyPayload::Run(f()),
+        InputJob::FlushHeldModifiers => {
+            crate::input::handlers::flush_held_modifiers();
+            InputReplyPayload::Ack
         }
     }
 }
@@ -143,10 +218,8 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
             loop {
                 // Process any queued input jobs first.
                 while let Ok((job, reply)) = rx.try_recv() {
-                    let res = match job {
-                        InputJob::Noop => Ok(()),
-                    };
-                    let _ = reply.send(res);
+                    let payload = run_job(job);
+                    let _ = reply.send(payload);
                 }
                 // SAFETY: GetMessageW blocks for the next OS message; HWND nullable.
                 let got = unsafe { GetMessageW(&mut msg, Some(HWND::default()), 0, 0) };
@@ -160,10 +233,8 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
                 }
                 // After waking on WM_USER (job-queued nudge), drain again.
                 while let Ok((job, reply)) = rx.try_recv() {
-                    let res = match job {
-                        InputJob::Noop => Ok(()),
-                    };
-                    let _ = reply.send(res);
+                    let payload = run_job(job);
+                    let _ = reply.send(payload);
                 }
             }
 

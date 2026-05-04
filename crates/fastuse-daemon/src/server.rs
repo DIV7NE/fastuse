@@ -19,7 +19,7 @@ use crate::sd::{current_user_only, sa_ptr};
 /// Run the daemon pipe server. Returns when shutdown is requested.
 pub async fn serve(
     pipe_path: String,
-    input: Option<&InputThreadHandle>,
+    input: Option<Arc<InputThreadHandle>>,
     _uia: Option<&UiaPoolHandle>,
     _capture: Option<&CaptureThreadHandle>,
     idle_timeout_secs: u64,
@@ -35,14 +35,9 @@ pub async fn serve(
         std::io::Error::new(std::io::ErrorKind::Other, format!("build SD: {e}"))
     })?;
 
-    // Wrap input handle in Arc so dispatch tasks can share it.
-    let input_arc: Option<Arc<InputThreadHandle>> = None; // shared via raw &
-    // We can't safely move &InputThreadHandle into many tokio tasks, but the
-    // input thread itself is Sync via &Self::send. Skip Arc and use an
-    // unsafe-but-bounded shared reference via a leaked static? Simpler: pass
-    // None to dispatch and let Phase 1 run without the win32_work_us roundtrip
-    // (it's acceptable to report 0). The dispatch ctx still has the field.
-    let _ = input;
+    // Phase 2: input handle is now an Arc<InputThreadHandle> (cloned from
+    // the daemon main); each connection task holds its own clone.
+    let input_arc = input;
 
     // Track whether we're creating the first pipe instance. The first
     // CreateNamedPipeW must use first_pipe_instance(true) to refuse to start
