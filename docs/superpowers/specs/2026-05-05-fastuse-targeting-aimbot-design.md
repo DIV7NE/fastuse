@@ -93,10 +93,22 @@ The decision is driven by **what the candidate actually supports**, not by Contr
 | OCR-derived bounds | Hit-tested BoundsClick |
 | Geometry-only candidate (caller-provided) | Hit-tested BoundsClick |
 
-Escalation is **two-tier max**, gated by verification:
-- pattern → BoundsClick on same UIA bounds → OCR re-resolve
+### Escalation ladder is candidate-kind dependent
 
-After two failed verified attempts, return rich diagnostic; do not thrash.
+The ladder length depends on the chosen candidate, not a fixed cap:
+
+| Candidate kind | Ladder |
+|----------------|--------|
+| `Uia` with patterns | pattern → BoundsClick(uia_rect) → OCR re-resolve (3 tiers) |
+| `Uia` without patterns | BoundsClick(uia_rect) → OCR re-resolve (2 tiers) |
+| `Geometry` (caller-provided) | BoundsClick(rect) → OCR re-resolve (2 tiers) |
+| `Ocr`-derived | BoundsClick(ocr_rect) only (1 tier; nowhere to escalate) |
+
+The cap is **max 2 verified attempts after the first attempt** — a structurally-no-op first tier (e.g. pattern attempt on a no-pattern candidate) doesn't count against the budget. Each tier is gated by hit-test + postcondition verification before counting as "attempted".
+
+`ActionOpts.escalate: Option<EscalatePolicy>` lets callers opt out:
+- `EscalatePolicy::Auto` (default) — full ladder for the candidate kind
+- `EscalatePolicy::Strict` — single-shot, no escalation (for QA flows where a miss must surface as a failure, not a recovery)
 
 ## Hit-test gate — mandatory before any coordinate click
 
@@ -111,38 +123,56 @@ This is the actual aimbot crosshair check. Without it, "click missed" is unobser
 
 ## Per-action postcondition contracts — the load-bearing piece
 
-The honesty mechanism. Each action type carries its own verification:
+The honesty mechanism. Each action type carries its own verification.
+
+**Property-state postconditions race against provider-side handlers.** UIA pattern handlers are *not* always synchronous — Electron, WPF binding pipelines, and message-pump-routed apps can take 50–200ms before the property updates. A bare "read after Invoke" is insufficient.
+
+**The verification helper polls** at 25ms cadence with a 250ms cap (configurable via `wait_timeout_ms`). Cheap when fast (one read), bounded when slow. Same shape as existing `wait_for` — reuse the helper.
 
 | Action | Postcondition | Implementation |
 |--------|---------------|----------------|
-| Invoke | Foreground/HWND change OR target subtree mutated OR caller `wait_for` matched | One UIA snapshot pre + post |
-| Toggle | `ToggleState` flipped (or matches intent) | Read pattern state before+after |
-| Select | `SelectionItemPattern.IsSelected == true` after | Read pattern state after |
-| ExpandCollapse | `ExpandCollapseState` matches intent | Read pattern state after |
-| SetValue (type) | `ValuePattern.Value` contains typed text | Read pattern state after |
-| BoundsClick (UIA) | Subtree mutation in target's parent OR caller `wait_for` matched | UIA snapshot pre + post |
+| Invoke | Subtree mutation OR caller `wait_for` matched | UIA snapshot pre + poll-post (parent's children RuntimeId set diff OR foreground HWND change OR focused element change) |
+| Toggle | `ToggleState` matches intent | Poll pattern state, 25ms cadence, 250ms cap |
+| Select | `SelectionItemPattern.IsSelected == true` | Poll pattern state, 25ms cadence, 250ms cap |
+| ExpandCollapse | `ExpandCollapseState` matches intent | Read after — set synchronously by provider in the common case; fall to poll on mismatch |
+| SetValue (type) | `ValuePattern.Value.to_lowercase().contains(typed.to_lowercase())` AND `len_ratio in 0.7..=1.5` | Poll value, 25ms cadence, 250ms cap. On tolerance failure, return `Unverified`, not `verified: false` (apps normalize text — Excel uppercases formulas, search boxes strip whitespace, IME composition reorders) |
+| BoundsClick (UIA) | Subtree mutation OR caller `wait_for` matched | Same as Invoke — uses parent's children RuntimeId set diff |
 | BoundsClick (OCR) | Caller `wait_for` matched (no other honest verifier without semantic context) | Falls back to caller intent |
 
-Generic verification (screenshot diff, raw UIA-root mutation) is **explicitly rejected** as unreliable. Without an applicable postcondition, the response is honest:
+### "Subtree mutation" — precise definition
+
+Required because a naive child-count diff blows the false-fail budget on any app with a tooltip:
+
+> **Subtree mutation =** RuntimeId set of the *target's parent's* children differs from pre-snapshot, OR foreground HWND changed, OR focused element changed.
+
+The pre-action probe must retain a cached reference to the target's parent so the post-snapshot can re-walk just that one level. Adds one cached element to the pre-action probe; no extra UIA walk on the action path.
+
+Generic verification (screenshot diff, raw UIA-root mutation) is **explicitly rejected** as unreliable.
+
+### Response shape
 
 ```rust
 pub struct ActionResult {
-    pub attempted: bool,           // strategy ran
     pub verified: bool,            // postcondition matched
     pub evidence: VerificationEvidence,
     pub strategy_used: Strategy,
-    pub screenshot: Option<ScreenshotPayload>,  // populated on miss for agent recovery
+    pub waited_ms: Option<u32>,    // None when no wait_for / no postcondition polled
+    pub screenshot: Option<ScreenshotPayload>,
 }
 
 pub enum VerificationEvidence {
     PostconditionMet,    // toggle flipped, value set, selection changed, etc.
-    WaitForMatched,      // caller-supplied wait_for selector hit
+    WaitForMatched,      // caller-supplied wait_for / expect matched
     HitTestOnly,         // we hit the right pixel; no postcondition available
-    Unverified,          // attempted but no contract applicable and no caller hint
+    Unverified,          // attempted but no contract applicable, or contract failed tolerance check
 }
 ```
 
-`Unverified` is the new honest state. The existing `ActionOpts.wait_for` / `verify` remain — they become one evidence source among several.
+`attempted` is *not* a field — `Response::ActionResult` is only emitted after the strategy actually ran. Inner failures (input thread unavailable, etc.) return `Response::Error`, never `ActionResult`. Encoding `attempted: bool` would name a state that can't exist.
+
+`waited_ms: Option<u32>` replaces the old `u32` — `None` is the honest encoding for "no wait_for requested and no postcondition polled".
+
+`Unverified` is the new honest state. Better an honest "couldn't tell" than a noisy false-fail.
 
 ## OCR strategy — cropped progressive
 
@@ -158,14 +188,10 @@ Latency target: warm OCR ~30ms (cached), cold OCR <100ms (cropped). Full-window 
 
 ## Wire format changes
 
-`fastuse-proto/src/wire.rs`:
+`fastuse-proto/src/wire.rs` — clean break:
 
 ```rust
-// Existing Response::ActionResult { ok, wait_matched, waited_ms, screenshot }
-// becomes:
-
 Response::ActionResult {
-    attempted: bool,
     verified: bool,
     evidence: VerificationEvidence,
     strategy_used: Strategy,
@@ -174,26 +200,35 @@ Response::ActionResult {
 }
 ```
 
-`ok` is removed — it conflated "attempted" and "verified" and that conflation was the bug. `verified: bool` is the contract callers should branch on.
+`ok` is removed from the wire — it conflated "attempted" and "verified" and that conflation was the L-Connect3 bug. `verified: bool` is the contract callers should branch on.
 
-`Request::ClickElement` etc. add an optional `expect` field for cases where the caller has stronger semantic knowledge than the daemon:
+**MCP edge compat (one release):** `fastuse-mcp/src/handler.rs` `ActionResultOutput` emits **both** `ok` (= `verified`) and `verified` for one release. Schema description marks `ok` deprecated. Removed in v1.1. The CLI's `print_action_or_ack` does the same. ~6 LOC of compat cost; keeps every existing agent prompt and CLAUDE.md trigger working.
+
+**`ActionOpts` consolidation:** the existing `verify: Option<Selector>` and the new `expect` overlap. Fold `verify` into `expect::SelectorMatches` and remove the `verify` field — one concept on the wire:
 
 ```rust
 pub struct ActionOpts {
-    pub wait_for: Option<Selector>,
-    pub verify: Option<Selector>,
-    pub expect: Option<ExpectClause>,   // new
+    pub wait_for: Option<Selector>,        // unchanged — non-failing wait
+    pub expect: Option<ExpectClause>,      // replaces verify; failing wait + richer postconditions
     pub screenshot_after: Option<ScreenshotOpts>,
     pub wait_timeout_ms: Option<u32>,
+    pub escalate: Option<EscalatePolicy>,  // new — Auto (default) | Strict
 }
 
 pub enum ExpectClause {
     DialogOpens,
     WindowTitleMatches(String),
     ForegroundChangesTo { class: Option<String>, title: Option<String> },
-    SelectorMatches(Selector),     // alias of wait_for, kept for ergonomics
+    SelectorMatches(Selector),
+}
+
+pub enum EscalatePolicy {
+    Auto,    // full ladder for the candidate kind (default)
+    Strict,  // single-shot, no escalation (QA flows)
 }
 ```
+
+**Phase 4 actions also use the new `ActionResult` shape.** `launch_app`, `clipboard_set_text`, `clipboard_set_image`, `kill_process`, `shell_exec` all currently route through `dispatch::finalize()` and therefore emit `ActionResult`. The wire change applies workspace-wide, not just to element-targeting. This is intentional — the same honesty rules apply ("did the launch actually start the process?", "did the clipboard set?", etc.). v1.1 may grow per-action postcondition contracts for the Phase 4 cohort; v1.0 returns `Unverified` honestly.
 
 ## Signals added beyond the original proposal
 
@@ -251,21 +286,28 @@ Per Codex review:
 
 ## Implementation order
 
-1. `targeting/` module skeleton + composite cache key
-2. `WindowSignals` + tree-quality probe + child-HWND class collection
-3. `TargetCandidate` resolution from UIA (existing walker, refactored)
-4. Pattern-availability-first strategy picker (replaces existing `click_element` core)
-5. Postcondition contracts for the 5 cheap pattern cases
-6. Hit-test gate before any coordinate click
-7. New `ActionResult` wire shape + `ExpectClause`
-8. Cropped progressive OCR + frame-hash cache (`fastuse-win/src/ocr/`)
-9. Hybrid scoring (UIA + OCR + geometry → ranked candidates)
-10. Two-tier verified escalation
-11. Bench fixture: L-Connect3 settings click; Discord DM send via `ByText`; Calculator round-trip
+1. New wire shape — `ActionResult { verified, evidence, strategy_used, waited_ms: Option<u32>, screenshot }`; `ActionOpts` consolidation (drop `verify`, add `expect: ExpectClause`, add `escalate: EscalatePolicy`); MCP edge `ok` alias for one release
+2. `targeting/` module skeleton + composite cache key (`{hwnd, pid, process_start, generation}`)
+3. `WindowSignals` + tree-quality probe + child-HWND class collection (incl. cloaked, occluded, foreground eligibility, DWM extended frame bounds)
+4. `TargetCandidate` resolution from UIA (refactor existing walker)
+5. Pattern-availability-first strategy picker
+6. Hit-test gate (`ElementFromPoint` + RuntimeId / 70% bbox-overlap match) before any coordinate click
+7. Postcondition contracts for the 5 cheap pattern cases — Invoke, Toggle, Select, ExpandCollapse, SetValue — with 25ms-cadence/250ms-cap polling helper. Subtree-mutation defined as parent's children RuntimeId set diff OR foreground HWND change OR focused element change
+8. New OCR thread (`fastuse-win/src/ocr_thread.rs`) — MTA, closure-dispatch, cached `OcrEngine`. Add to D-25 lint allowlist explicitly
+9. Cropped progressive OCR (window → likely regions → full) + frame-hash cache
+10. Hybrid scoring (UIA + OCR + geometry → ranked candidates)
+11. Candidate-kind-dependent escalation ladder, max 2 verified attempts after first; respect `EscalatePolicy::Strict`
+12. Bench fixture: L-Connect3 settings click; Discord DM send via OCR fallback; Calculator round-trip with postcondition verification
+
+Wire change (item 1) goes first because every other step touches the response shape. Phase 4 actions inherit the new shape automatically via `dispatch::finalize()` — they emit `verified: false, evidence: Unverified` honestly until v1.1 grows per-action contracts for them.
 
 ## Open invariants
 
 - D-24 (PerMonitorV2 first-call): unchanged
-- D-25 (no `windows::*` on tokio threads): targeting/ runs on UIA pool + capture thread; OCR runs on dedicated WinRT thread (new) since `Windows.Media.Ocr` is async-COM and shouldn't share the UIA MTA pool
+- D-25 (no `windows::*` on tokio threads): targeting/ runs on UIA pool + capture thread; OCR runs on **a new dedicated MTA thread** (fourth COM-thread surface, explicitly added to D-25 lint allowlist). Reasoning:
+  - Capture thread owns the GPU pipeline (D3D11 device, duplication, staging texture). Routing 30–100ms OCR jobs onto it serializes against every screenshot, multiplying screenshot p50 by 10–30× — including the post-action `screenshot_after` that fires on the same logical action.
+  - UIA pool workers are sized for sub-20ms work. With only 3 workers, one in-flight OCR + one verify-poll + one routine query saturates the pool and blows UIA p99.
+  - `Windows.Media.Ocr::OcrEngine` has cached language-model state (~50–200ms cold construction). A dedicated thread caches one `OcrEngine` in a `OnceLock` for daemon lifetime without polluting the UIA singleton.
+  - Implementation: copy-paste `capture_thread.rs` shape — single MTA thread, closure-dispatch via `Run(Box<dyn FnOnce()>)`, `OcrThreadHandle::run<F,T>` mirroring `UiaPoolHandle::run`. ~150 LOC.
 - D-10 / D-19 (Redact wrapping): all OCR results are `Redact<String>` — text on screen is sensitive
 - New invariant: **no action returns `verified: true` without a postcondition contract or caller-provided `wait_for` / `expect` matching.** Lint-enforced via xtask check.
