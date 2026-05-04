@@ -1,5 +1,10 @@
 //! Verify Request/Response variants in fastuse-proto don't expose raw byte
-//! payloads outside `Redact<T>`. Phase 1 scope: enums in fastuse-proto only.
+//! payloads outside `Redact<T>`.
+//!
+//! Scope (WR-09): all `.rs` files under `crates/fastuse-proto/src` plus any
+//! `handler*.rs` or `dispatch*.rs` under `crates/*/src` so payload-bearing
+//! tool handlers added in later phases are caught the moment they declare a
+//! suspicious field name or a bare `Vec<u8>`.
 
 use std::path::Path;
 
@@ -10,13 +15,16 @@ const SUSPICIOUS_FIELD_NAMES: &[&str] =
 
 pub fn run(workspace_root: &Path) -> anyhow::Result<()> {
     let mut failures: Vec<String> = Vec::new();
-    let proto_dir = workspace_root.join("crates/fastuse-proto/src");
-    for entry in walkdir::WalkDir::new(&proto_dir)
+    let crates_dir = workspace_root.join("crates");
+    for entry in walkdir::WalkDir::new(&crates_dir)
         .into_iter()
         .filter_map(Result::ok)
     {
         let p = entry.path();
         if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        if !is_in_scope(p) {
             continue;
         }
         let src = std::fs::read_to_string(p)?;
@@ -28,6 +36,22 @@ pub fn run(workspace_root: &Path) -> anyhow::Result<()> {
         anyhow::bail!("check-redact failures:\n{}", failures.join("\n"));
     }
     Ok(())
+}
+
+/// In-scope files: everything under `fastuse-proto/src`, plus any
+/// `handler*.rs` / `dispatch*.rs` under `crates/*/src` (WR-09).
+fn is_in_scope(p: &Path) -> bool {
+    let s = p.to_string_lossy().replace('\\', "/");
+    if s.contains("/fastuse-proto/src/") {
+        return true;
+    }
+    let fname = p
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    (fname.starts_with("handler") || fname.starts_with("dispatch"))
+        && fname.ends_with(".rs")
+        && s.contains("/src/")
 }
 
 pub fn check_source(src: &str) -> Result<(), String> {

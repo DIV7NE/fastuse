@@ -85,6 +85,18 @@ pub fn write_frame<T: Serialize, W: Write>(w: &mut W, value: &T) -> Result<(), F
     Ok(())
 }
 
+/// Decode a postcard frame whose 4-byte length prefix has *already* been
+/// stripped by the caller. Use this when you've already read the prefix off
+/// the wire (e.g. to validate `MAX_FRAME_BYTES` before allocating) and you
+/// don't want to reallocate + memcpy just to satisfy [`decode_frame`]'s
+/// self-prefixed shape (WR-12).
+pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, FrameError> {
+    if payload.len() as u64 > MAX_FRAME_BYTES as u64 {
+        return Err(FrameError::TooLarge(payload.len()));
+    }
+    postcard::from_bytes(payload).map_err(FrameError::Deserialize)
+}
+
 /// Decode a single length-prefixed postcard frame from `r`.
 ///
 /// Refuses any declared length above [`MAX_FRAME_BYTES`] without allocating.

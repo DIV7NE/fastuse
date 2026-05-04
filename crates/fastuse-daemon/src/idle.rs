@@ -67,8 +67,22 @@ pub fn spawn_watcher(
             let last_us = clock.last_activity_us.load(Ordering::SeqCst);
             let now_us = base.elapsed().as_micros() as u64;
             if now_us.saturating_sub(last_us) >= timeout.as_micros() as u64 {
-                tracing::info!(timeout_secs, "idle timeout reached; shutting down");
-                shutdown_flag.store(true, Ordering::SeqCst);
+                // Re-check active under a compare_exchange to close the race
+                // where a fresh client started note_connect between our load
+                // and the shutdown store (WR-04). If active != 0 by now, a
+                // new connection just arrived — bail out of the timeout decision
+                // and reset the activity clock so the next idle window starts
+                // from this moment.
+                if clock.active.load(Ordering::SeqCst) != 0 {
+                    clock.touch(base);
+                    continue;
+                }
+                if shutdown_flag
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    tracing::info!(timeout_secs, "idle timeout reached; shutting down");
+                }
                 return;
             }
         }

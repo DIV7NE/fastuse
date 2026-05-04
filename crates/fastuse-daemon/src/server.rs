@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use fastuse_proto::{decode_frame, encode_frame, Request, Response};
+use fastuse_proto::{decode_payload, encode_frame, Request, Response};
 use fastuse_win::{
     capture_thread::CaptureThreadHandle, input_thread::InputThreadHandle, uia_pool::UiaPoolHandle,
 };
@@ -171,12 +171,8 @@ async fn read_frame<T: serde::de::DeserializeOwned>(
     }
     let mut buf = vec![0u8; len as usize];
     pipe.read_exact(&mut buf).await?;
-    // Reconstruct length-prefixed buffer for decode_frame.
-    let mut full = Vec::with_capacity(4 + buf.len());
-    full.extend_from_slice(&len_bytes);
-    full.extend_from_slice(&buf);
-    let mut cursor = std::io::Cursor::new(full);
-    decode_frame(&mut cursor)
+    // Decode in place — no re-prepend, no second allocation (WR-12).
+    decode_payload(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("decode: {e}")))
 }
 

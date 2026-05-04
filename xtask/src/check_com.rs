@@ -1,5 +1,27 @@
 //! Verify no `tokio::spawn(...)` body or `#[tokio::main]` async fn body
 //! contains a `windows::*` or `uiautomation::*` path reference.
+//!
+//! # Known limits (WR-08)
+//!
+//! This lint is intentionally heuristic. Reviewers should not trust it
+//! beyond the cases it actually inspects:
+//!
+//! 1. **First-segment match only.** `ForbiddenPathScanner::visit_expr_path`
+//!    looks at `segments.first()`. A `use windows::Win32::Foundation::HWND;`
+//!    followed by bare `HWND::default()` inside a tokio task is invisible to
+//!    this lint. So is any aliased import (`use windows as w; w::...`).
+//! 2. **`tokio::spawn` + `#[tokio::main]` only.** Manual runtimes built via
+//!    `tokio::runtime::Builder::new_multi_thread().build()` followed by
+//!    `rt.block_on(...)` are NOT scanned. The daemon currently uses this
+//!    pattern in `fastuse-daemon::main`, so async code reachable from
+//!    `server::serve` / `dispatch::handle` is not lint-covered.
+//! 3. **Type paths and method-call receivers.** `visit_expr_path` ignores
+//!    `Type` nodes (turbofish, generics) and method-call segments.
+//!
+//! Treat a green run as "the obvious cases are clean," not "no Win32 work
+//! happens on tokio threads." The semantic guarantee comes from D-26 and
+//! review discipline; this lint catches regressions only at the syntactic
+//! shapes enumerated above.
 
 use std::path::Path;
 

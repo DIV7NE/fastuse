@@ -1,6 +1,6 @@
 //! Length-prefixed postcard I/O over a tokio NamedPipeClient.
 
-use fastuse_proto::{decode_frame, encode_frame, Request, Response};
+use fastuse_proto::{decode_payload, encode_frame, Request, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
@@ -24,10 +24,7 @@ pub async fn read_response(pipe: &mut NamedPipeClient) -> std::io::Result<Respon
     }
     let mut buf = vec![0u8; len as usize];
     pipe.read_exact(&mut buf).await?;
-    let mut full = Vec::with_capacity(4 + buf.len());
-    full.extend_from_slice(&len_bytes);
-    full.extend_from_slice(&buf);
-    let mut cursor = std::io::Cursor::new(full);
-    decode_frame(&mut cursor)
+    // Decode in place — halves allocations on every response (WR-12).
+    decode_payload(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("decode: {e}")))
 }
