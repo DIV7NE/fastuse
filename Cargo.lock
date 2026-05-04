@@ -397,9 +397,9 @@ dependencies = [
  "fastuse-core",
  "fastuse-proto",
  "fastuse-win",
- "interprocess",
  "postcard",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1660,6 +1660,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "proc-macro2",
+ "quote",
  "syn",
  "walkdir",
 ]

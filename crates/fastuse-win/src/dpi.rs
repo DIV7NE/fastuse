@@ -35,6 +35,13 @@ pub fn set_per_monitor_v2_first_call() -> DpiOutcome {
         return DpiOutcome::AlreadySetByManifest;
     }
     // Any other failure is logged but non-fatal (still want main() to proceed).
-    tracing::warn!(error = err.0, "SetProcessDpiAwarenessContext failed; continuing");
+    // Use eprintln! rather than tracing::warn! because every binary calls
+    // this helper *before* tracing_init runs, and the tracing global
+    // subscriber is not yet installed — a tracing::warn! here would be
+    // silently dropped (WR-10). stderr is always available.
+    eprintln!(
+        "fastuse: SetProcessDpiAwarenessContext failed (LastError={}); continuing without PerMonitorV2",
+        err.0
+    );
     DpiOutcome::Set
 }

@@ -13,9 +13,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW,
-    PostThreadMessageW, RegisterClassExW, TranslateMessage, CW_USEDEFAULT, HMENU, HWND_MESSAGE,
-    MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_QUIT, WM_USER, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    PostMessageW, PostThreadMessageW, RegisterClassExW, TranslateMessage, UnregisterClassW,
+    CW_USEDEFAULT, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_QUIT, WM_USER,
+    WNDCLASSEXW,
 };
 
 /// Job sent to the input thread.
@@ -158,10 +159,16 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
                 }
             }
 
-            // SAFETY: HWND was created above; PostMessageW with WM_NULL would also work.
+            // Tear down the message-only window and unregister our class so
+            // the HWND/atom don't leak past process shutdown (WR-13). Best-
+            // effort: failures here are non-fatal because process exit will
+            // reclaim regardless.
             if hwnd.0 as isize != 0 {
-                let _ = unsafe { PostMessageW(Some(hwnd), 0, WPARAM(0), LPARAM(0)) };
+                // SAFETY: HWND was created above on this thread.
+                let _ = unsafe { DestroyWindow(hwnd) };
             }
+            // SAFETY: class was registered on this thread above.
+            let _ = unsafe { UnregisterClassW(class_name, Some(hinstance.into())) };
             // SAFETY: paired with the CoInitializeEx above.
             unsafe { CoUninitialize() };
         })?;

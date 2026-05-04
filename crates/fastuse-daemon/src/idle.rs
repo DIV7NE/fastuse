@@ -19,7 +19,17 @@ impl ActivityClock {
         self.active.fetch_add(1, Ordering::SeqCst);
     }
     pub fn note_disconnect(&self, base: Instant) {
-        let _ = self.active.fetch_sub(1, Ordering::SeqCst);
+        // Saturating decrement: a stray disconnect-without-connect must not
+        // wrap u64::MAX and lock the watcher into "always active" forever
+        // (WR-03). Today the call sites are paired, but make the invariant
+        // self-enforcing.
+        let prev = self
+            .active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .unwrap_or(0);
+        debug_assert!(prev > 0, "note_disconnect without matching note_connect");
         self.last_activity_us
             .store(base.elapsed().as_micros() as u64, Ordering::SeqCst);
     }

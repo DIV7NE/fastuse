@@ -32,10 +32,15 @@ pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClien
             return Ok(c);
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        format!("DAEMON_SPAWN_FAILED: pipe {pipe_path} did not appear after backoff"),
-    ))
+    // Surface the typed protocol error as the io::Error source so downstream
+    // consumers (e.g. MCP edge serialization, test asserts) can downcast to
+    // `fastuse_proto::Error` and match on `ErrorCode::DaemonSpawnFailed`
+    // instead of substring-matching the message (WR-07 / D-18).
+    let err = fastuse_proto::Error::new(
+        fastuse_proto::ErrorCode::DaemonSpawnFailed,
+        format!("daemon pipe {pipe_path} did not appear after auto-spawn backoff"),
+    );
+    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, err))
 }
 
 fn locate_daemon() -> std::io::Result<PathBuf> {

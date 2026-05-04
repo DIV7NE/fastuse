@@ -18,16 +18,19 @@ pub async fn run(pipe_path: &str, bench: u32, pretty: bool) -> anyhow::Result<()
         return Ok(());
     }
 
-    // --bench N: cold = first iteration, warm = remaining.
+    // --bench N: cold_total = connect+handshake; first_ping = first ping
+    // RTT measured separately; warm = remaining N-1 pings (FND-12 / WR-02).
     let cold_start = Instant::now();
     let mut pipe = connect_or_spawn(pipe_path).await?;
     handshake(&mut pipe).await?;
     let cold_us = cold_start.elapsed().as_micros() as u64;
 
-    let mut samples: Vec<u64> = Vec::with_capacity(bench as usize);
-    let mut last_pid: u32 = 0;
-    let mut last_session: u32 = 0;
-    for _ in 0..bench {
+    // Cold first ping is reported separately and excluded from warm samples.
+    let (first_ping_us, mut last_pid, mut last_session) = single_ping(&mut pipe).await?;
+
+    let warm_iters = bench.saturating_sub(1);
+    let mut samples: Vec<u64> = Vec::with_capacity(warm_iters as usize);
+    for _ in 0..warm_iters {
         let (rtt_us, pid, session) = single_ping(&mut pipe).await?;
         samples.push(rtt_us);
         last_pid = pid;
@@ -35,15 +38,21 @@ pub async fn run(pipe_path: &str, bench: u32, pretty: bool) -> anyhow::Result<()
     }
 
     samples.sort_unstable();
-    let warm_p50 = samples[samples.len() / 2];
-    let warm_p99 = samples[((samples.len() as f64) * 0.99).floor() as usize];
-    let warm_min = samples.first().copied().unwrap_or(0);
-    let warm_max = samples.last().copied().unwrap_or(0);
+    let warm_p50 = samples.get(samples.len() / 2).copied().unwrap_or(first_ping_us);
+    let warm_p99_idx = if samples.is_empty() {
+        0
+    } else {
+        ((samples.len() as f64) * 0.99).floor() as usize
+    };
+    let warm_p99 = samples.get(warm_p99_idx).copied().unwrap_or(first_ping_us);
+    let warm_min = samples.first().copied().unwrap_or(first_ping_us);
+    let warm_max = samples.last().copied().unwrap_or(first_ping_us);
 
     let report = json!({
         "ok": true,
         "iterations": bench,
         "cold_total_us": cold_us,
+        "first_ping_us": first_ping_us,
         "warm_p50_us": warm_p50,
         "warm_p99_us": warm_p99,
         "warm_min_us": warm_min,
@@ -52,8 +61,9 @@ pub async fn run(pipe_path: &str, bench: u32, pretty: bool) -> anyhow::Result<()
         "session_id": last_session,
     });
     if pretty {
-        println!("ping --bench {bench}");
-        println!("  cold first-connect+handshake: {} us", cold_us);
+        println!("ping --bench {bench} (sequential samples on a single pipe)");
+        println!("  cold connect+handshake: {} us", cold_us);
+        println!("  first ping: {} us", first_ping_us);
         println!("  warm  p50: {} us  p99: {} us  min: {} us  max: {} us",
                  warm_p50, warm_p99, warm_min, warm_max);
         println!("  daemon_pid={}, session_id={}", last_pid, last_session);
