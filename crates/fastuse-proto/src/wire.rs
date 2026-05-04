@@ -7,6 +7,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 use crate::error::Error;
+use crate::redact::Redact;
 
 /// Hard cap on a single frame payload. Per threat T-01-02, an oversized
 /// length-prefix declared by an attacker MUST NOT cause unbounded allocation.
@@ -34,6 +35,282 @@ pub enum Request {
     },
     /// Cooperative shutdown (used by `fastuse-cli stop`, D-04).
     Shutdown,
+    /// Read clipboard contents (Phase 4).
+    ClipboardGet(ClipboardGet),
+    /// Write clipboard contents (Phase 4).
+    ClipboardSet(ClipboardSet),
+    /// Spawn a shell command and stream output (Phase 4). The wire layer
+    /// returns a single `ShellExecResult` summary; streaming chunks are
+    /// emitted out-of-band by the MCP server (see `ShellChunk`).
+    ShellExec(ShellExec),
+    /// Launch an application by query (Phase 4).
+    LaunchApp(LaunchApp),
+    /// Enumerate running processes (Phase 4).
+    ListProcesses(ListProcesses),
+    /// Terminate a process by PID or name (Phase 4).
+    KillProcess(KillProcess),
+}
+
+/// Clipboard format selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipFormat {
+    /// CF_UNICODETEXT path.
+    Text,
+    /// CF_DIBV5 → PNG path.
+    Image,
+}
+
+/// Read clipboard request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardGet {
+    /// If `Some`, only return that format; if `None`, prefer text then image.
+    pub format: Option<ClipFormat>,
+}
+
+/// Read clipboard response.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardGetResp {
+    /// Clipboard is empty (or didn't have the requested format).
+    None,
+    /// Text payload — UTF-8.
+    Text {
+        /// Plain text contents (Redact-wrapped).
+        text: Redact<String>,
+    },
+    /// Image payload — PNG bytes (encoded from CF_DIBV5 by the daemon).
+    Image {
+        /// MIME type, currently always `image/png`.
+        mime: String,
+        /// Base64-encoded PNG bytes (Redact-wrapped).
+        base64: Redact<String>,
+        /// Image width in pixels.
+        w: u32,
+        /// Image height in pixels.
+        h: u32,
+    },
+}
+
+impl core::fmt::Debug for ClipboardGetResp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::None => write!(f, "ClipboardGetResp::None"),
+            Self::Text { text } => f
+                .debug_struct("ClipboardGetResp::Text")
+                .field("text", text)
+                .finish(),
+            Self::Image { mime, base64, w, h } => f
+                .debug_struct("ClipboardGetResp::Image")
+                .field("mime", mime)
+                .field("base64", base64)
+                .field("w", w)
+                .field("h", h)
+                .finish(),
+        }
+    }
+}
+
+/// Write clipboard request.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardSet {
+    /// Plain text payload.
+    Text(Redact<String>),
+    /// Image payload (PNG / JPEG bytes).
+    Image {
+        /// MIME type of the input bytes.
+        mime: String,
+        /// Encoded image bytes (Redact-wrapped).
+        bytes: Redact<Vec<u8>>,
+        /// Image width in pixels.
+        w: u32,
+        /// Image height in pixels.
+        h: u32,
+    },
+}
+
+impl core::fmt::Debug for ClipboardSet {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Text(t) => f.debug_tuple("ClipboardSet::Text").field(t).finish(),
+            Self::Image { mime, bytes, w, h } => f
+                .debug_struct("ClipboardSet::Image")
+                .field("mime", mime)
+                .field("bytes", bytes)
+                .field("w", w)
+                .field("h", h)
+                .finish(),
+        }
+    }
+}
+
+/// Shell choice mirrored from `fastuse_core::shell::quoting::Shell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellKind {
+    /// `cmd.exe`.
+    Cmd,
+    /// `powershell.exe`.
+    Powershell,
+    /// `pwsh.exe`.
+    Pwsh,
+    /// `bash.exe`.
+    Bash,
+}
+
+/// `shell_exec` request.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellExec {
+    /// User-supplied command line, passed verbatim to the chosen shell.
+    pub command: Redact<String>,
+    /// Shell to use; default `Cmd`.
+    pub shell: Option<ShellKind>,
+    /// Extra environment variables.
+    pub env: Option<Vec<(String, Redact<String>)>>,
+    /// Working directory for the child process.
+    pub cwd: Option<String>,
+    /// Timeout in milliseconds; default 30_000 (30s).
+    pub timeout_ms: Option<u64>,
+    /// Streaming chunk size in bytes; default 4096.
+    pub stream_chunk_size: Option<u32>,
+}
+
+impl core::fmt::Debug for ShellExec {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ShellExec")
+            .field("command", &self.command)
+            .field("shell", &self.shell)
+            .field("env_count", &self.env.as_ref().map(|e| e.len()).unwrap_or(0))
+            .field("cwd", &self.cwd)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("stream_chunk_size", &self.stream_chunk_size)
+            .finish()
+    }
+}
+
+/// One chunk of streamed shell output (delivered out-of-band by the MCP
+/// streaming surface; the request/response wire returns the `Done` summary).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellChunk {
+    /// stdout slice.
+    Stdout(Redact<Vec<u8>>),
+    /// stderr slice.
+    Stderr(Redact<Vec<u8>>),
+    /// Process exit summary.
+    Done {
+        /// Exit status; `-1` if killed by timeout / drop.
+        status: i32,
+        /// `true` if output was capped at the 1 MiB ring-buffer.
+        truncated: bool,
+    },
+}
+
+impl core::fmt::Debug for ShellChunk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Stdout(b) => f.debug_tuple("ShellChunk::Stdout").field(b).finish(),
+            Self::Stderr(b) => f.debug_tuple("ShellChunk::Stderr").field(b).finish(),
+            Self::Done { status, truncated } => f
+                .debug_struct("ShellChunk::Done")
+                .field("status", status)
+                .field("truncated", truncated)
+                .finish(),
+        }
+    }
+}
+
+/// Aggregate result returned over the request/response wire (output bytes
+/// stripped — they were streamed earlier as `ShellChunk` events).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellExecResult {
+    /// Captured stdout bytes (Redact-wrapped). May be empty if streamed.
+    pub stdout: Redact<Vec<u8>>,
+    /// Captured stderr bytes (Redact-wrapped). May be empty if streamed.
+    pub stderr: Redact<Vec<u8>>,
+    /// Exit status; `-1` if killed by timeout / drop.
+    pub status: i32,
+    /// True if output cap fired.
+    pub truncated: bool,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+impl core::fmt::Debug for ShellExecResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ShellExecResult")
+            .field("stdout", &self.stdout)
+            .field("stderr", &self.stderr)
+            .field("status", &self.status)
+            .field("truncated", &self.truncated)
+            .field("duration_ms", &self.duration_ms)
+            .finish()
+    }
+}
+
+/// `launch_app` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchApp {
+    /// User-supplied query: absolute path, .lnk display name, AUMID, or PATH binary.
+    pub query: String,
+}
+
+/// `launch_app` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchAppResp {
+    /// Spawned process PID.
+    pub pid: u32,
+    /// Main window handle (if a visible top-level window appeared in 3s).
+    pub hwnd: Option<isize>,
+    /// Window title at the moment of detection.
+    pub title: Option<String>,
+    /// Window class.
+    pub class: Option<String>,
+}
+
+/// `list_processes` filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProcFilter {
+    /// Case-insensitive substring filter on the process name.
+    pub name_contains: Option<String>,
+    /// If true, exclude processes that have no visible main window.
+    pub visible_only: Option<bool>,
+}
+
+/// `list_processes` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListProcesses {
+    /// Optional filter.
+    pub filter: Option<ProcFilter>,
+}
+
+/// One entry in the process list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    /// Process ID.
+    pub pid: u32,
+    /// Executable file stem (e.g. `notepad`).
+    pub name: String,
+    /// Full executable path, when readable (PROCESS_QUERY_LIMITED_INFORMATION).
+    pub exe_path: Option<String>,
+    /// First visible top-level main window for this PID, if any.
+    pub main_hwnd: Option<isize>,
+}
+
+/// Process selector for `kill_process`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessSelector {
+    /// Match by PID.
+    Pid(u32),
+    /// Match by name (case-insensitive exact stem match).
+    Name(String),
+}
+
+/// `kill_process` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KillProcess {
+    /// Selector.
+    pub selector: ProcessSelector,
+    /// Best-effort hard-kill (NtSuspendProcess + TerminateProcess).
+    pub force: Option<bool>,
+    /// Kill the entire process tree via Job object (Win10+).
+    pub process_tree: Option<bool>,
 }
 
 /// All responses sent daemon → client.
@@ -57,6 +334,21 @@ pub enum Response {
     },
     /// Structured error.
     Error(Error),
+    /// `clipboard_get` reply.
+    ClipboardGet(ClipboardGetResp),
+    /// `clipboard_set` ack.
+    ClipboardSet,
+    /// `shell_exec` summary (streamed chunks emitted out-of-band).
+    ShellExec(ShellExecResult),
+    /// `launch_app` reply.
+    LaunchApp(LaunchAppResp),
+    /// `list_processes` reply.
+    ListProcesses(Vec<ProcessInfo>),
+    /// `kill_process` ack — number of PIDs that were terminated.
+    KillProcess {
+        /// Number of process handles terminated.
+        terminated: u32,
+    },
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in
@@ -199,6 +491,137 @@ mod tests {
             Err(FrameError::TooLarge(_)) => (),
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clipboard_set_text_round_trips() {
+        let req = Request::ClipboardSet(ClipboardSet::Text(Redact::new("hello".to_string())));
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn clipboard_set_image_round_trips() {
+        let req = Request::ClipboardSet(ClipboardSet::Image {
+            mime: "image/png".into(),
+            bytes: Redact::new(vec![1u8, 2, 3, 4]),
+            w: 4,
+            h: 4,
+        });
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn shell_exec_round_trips() {
+        let req = Request::ShellExec(ShellExec {
+            command: Redact::new("dir".into()),
+            shell: Some(ShellKind::Cmd),
+            env: Some(vec![("FOO".into(), Redact::new("bar".into()))]),
+            cwd: Some("C:\\".into()),
+            timeout_ms: Some(5_000),
+            stream_chunk_size: Some(2048),
+        });
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn launch_app_round_trips() {
+        let req = Request::LaunchApp(LaunchApp {
+            query: "notepad".into(),
+        });
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn list_processes_round_trips() {
+        let req = Request::ListProcesses(ListProcesses {
+            filter: Some(ProcFilter {
+                name_contains: Some("explorer".into()),
+                visible_only: Some(true),
+            }),
+        });
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn kill_process_round_trips() {
+        let req = Request::KillProcess(KillProcess {
+            selector: ProcessSelector::Pid(1234),
+            force: Some(false),
+            process_tree: Some(true),
+        });
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn shell_exec_response_round_trips() {
+        let res = Response::ShellExec(ShellExecResult {
+            stdout: Redact::new(b"ok\n".to_vec()),
+            stderr: Redact::new(vec![]),
+            status: 0,
+            truncated: false,
+            duration_ms: 12,
+        });
+        let bytes = encode_frame(&res).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Response = decode_frame(&mut cur).unwrap();
+        assert_eq!(res, decoded);
+    }
+
+    #[test]
+    fn shell_exec_debug_does_not_leak_command() {
+        let req = ShellExec {
+            command: Redact::new("rm -rf SECRET-MARKER-XYZ".into()),
+            shell: None,
+            env: None,
+            cwd: None,
+            timeout_ms: None,
+            stream_chunk_size: None,
+        };
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("SECRET-MARKER-XYZ"), "Debug leaked command: {dbg}");
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn clipboard_set_image_debug_does_not_leak_bytes() {
+        let cs = ClipboardSet::Image {
+            mime: "image/png".into(),
+            bytes: Redact::new(vec![0xAA, 0xBB, 0xCC, 0xDD]),
+            w: 1,
+            h: 1,
+        };
+        let dbg = format!("{cs:?}");
+        assert!(!dbg.contains("AA"));
+        assert!(!dbg.contains("BB"));
+    }
+
+    #[test]
+    fn permission_required_error_carries_hint() {
+        let err = Error::new(crate::error::ErrorCode::PermissionRequired, "shell_exec gated")
+            .with_hint("restart with --allow=shell_exec");
+        let bytes = encode_frame(&err).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Error = decode_frame(&mut cur).unwrap();
+        assert_eq!(decoded.code, crate::error::ErrorCode::PermissionRequired);
+        assert_eq!(decoded.hint.as_deref(), Some("restart with --allow=shell_exec"));
     }
 
     #[test]

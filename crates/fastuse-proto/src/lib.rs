@@ -21,4 +21,9 @@ pub mod wire;
 
 pub use error::{Error, ErrorCode};
 pub use redact::{Redact, RedactLen};
-pub use wire::{decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, FrameError, MAX_FRAME_BYTES, Request, Response};
+pub use wire::{
+    decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, ClipFormat,
+    ClipboardGet, ClipboardGetResp, ClipboardSet, FrameError, KillProcess, LaunchApp,
+    LaunchAppResp, ListProcesses, ProcFilter, ProcessInfo, ProcessSelector, Request, Response,
+    ShellChunk, ShellExec, ShellExecResult, ShellKind, MAX_FRAME_BYTES,
+};
