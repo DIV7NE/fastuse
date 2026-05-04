@@ -107,14 +107,14 @@ fn main() {
         }));
     }
     let uia = match fastuse_win::uia_pool::spawn_uia_pool(3) {
-        Ok(h) => Some(h),
+        Ok(h) => Some(std::sync::Arc::new(h)),
         Err(e) => {
             tracing::error!(error = %e, "failed to spawn uia pool");
             None
         }
     };
     let capture = match fastuse_win::capture_thread::spawn_capture_thread() {
-        Ok(h) => Some(h),
+        Ok(h) => Some(std::sync::Arc::new(h)),
         Err(e) => {
             tracing::error!(error = %e, "failed to spawn capture thread");
             None
@@ -138,8 +138,8 @@ fn main() {
         server::serve(
             identity.path.clone(),
             input.clone(),
-            uia.as_ref(),
-            capture.as_ref(),
+            uia.clone(),
+            capture.clone(),
             args.idle_timeout,
             identity.session_id,
         )

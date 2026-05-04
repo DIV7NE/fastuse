@@ -19,8 +19,15 @@ use fastuse_proto::{
     coords::WindowInfo as ProtoWindowInfo, Error, ErrorCode, MonitorInfo, MouseButton, Request,
     Response, ScrollDirection,
 };
+use fastuse_win::capture::{handle_screenshot, handle_screenshot_region};
+use fastuse_win::capture_thread::CaptureThreadHandle;
 use fastuse_win::input::handlers as ih;
 use fastuse_win::input_thread::{InputJob, InputThreadHandle};
+use fastuse_win::uia::{
+    handle_click_element, handle_inspect_at_point, handle_scroll_into_view, handle_type_into_element,
+    handle_uia_query, handle_uia_tree, handle_wait_for_element,
+};
+use fastuse_win::uia_pool::UiaPoolHandle;
 use fastuse_win::window::{
     cursor_position::cursor_position, focus::focus_window, foreground::foreground_window,
     list_windows::list_windows, monitors::list_monitors, move_resize::resize_move_window,
@@ -30,6 +37,8 @@ use fastuse_win::window::{
 pub struct DispatchCtx {
     pub session_id: u32,
     pub input: Option<Arc<InputThreadHandle>>,
+    pub uia: Option<Arc<UiaPoolHandle>>,
+    pub capture: Option<Arc<CaptureThreadHandle>>,
     pub shutdown_flag: Arc<AtomicBool>,
     /// Reconciled idle timeout reported on every Welcome (D-22).
     pub idle_timeout_secs: u64,
@@ -147,22 +156,134 @@ pub fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             run_unit(ctx, &mut win32_us, move || resize_move_window(hwnd, x, y, w, h))
         }
 
-        // -------- Phase 3: capture + UIA (handlers land in Tasks 04-18) --------
-        // These arms exist so the wire surface is exhaustive against
-        // Request; full DXGI / UIA handlers are wired in subsequent commits.
-        Request::Screenshot { .. }
-        | Request::ScreenshotRegion { .. }
-        | Request::UiaTree { .. }
-        | Request::UiaQuery { .. }
-        | Request::InspectAtPoint { .. }
-        | Request::ClickElement { .. }
-        | Request::TypeIntoElement { .. }
-        | Request::WaitForElement { .. }
-        | Request::ScrollIntoView { .. } => Response::Error(Error::new(
-            ErrorCode::Internal,
-            "Phase 3 handler not yet wired — Tasks 04-18 land DXGI/UIA backends".to_string(),
-        )
-        .with_hint("rebuild after subsequent Phase 3 commits".to_string())),
+        // -------- Phase 3: capture (CAP-01..06) --------
+        Request::Screenshot { monitor, format } => match ctx.capture.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "capture thread unavailable".to_string(),
+            )),
+            Some(capture) => {
+                let w_start = Instant::now();
+                let r = handle_screenshot(capture, monitor, format);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::ScreenshotRegion {
+            x,
+            y,
+            w,
+            h,
+            monitor,
+            format,
+        } => match ctx.capture.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "capture thread unavailable".to_string(),
+            )),
+            Some(capture) => {
+                let region = fastuse_proto::coords::Rect {
+                    x,
+                    y,
+                    w: w as i32,
+                    h: h as i32,
+                };
+                let w_start = Instant::now();
+                let r = handle_screenshot_region(capture, region, monitor, format);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+
+        // -------- Phase 3: UIA (UIA-02..08) --------
+        Request::UiaTree { hwnd, depth, view } => match ctx.uia.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool unavailable".to_string(),
+            )),
+            Some(uia) => {
+                let w_start = Instant::now();
+                let r = handle_uia_tree(uia, hwnd, depth, view);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::UiaQuery { selector, root_hwnd } => match ctx.uia.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool unavailable".to_string(),
+            )),
+            Some(uia) => {
+                let w_start = Instant::now();
+                let r = handle_uia_query(uia, selector, root_hwnd);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::InspectAtPoint { x, y } => match ctx.uia.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool unavailable".to_string(),
+            )),
+            Some(uia) => {
+                let w_start = Instant::now();
+                let r = handle_inspect_at_point(uia, x, y);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::ClickElement { selector, modifiers } => {
+            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+                (Some(uia), Some(input)) => {
+                    let w_start = Instant::now();
+                    let r = handle_click_element(uia, input, selector, modifiers);
+                    win32_us = w_start.elapsed().as_micros() as i64;
+                    r.unwrap_or_else(Response::Error)
+                }
+                _ => Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "uia pool or input thread unavailable".to_string(),
+                )),
+            }
+        }
+        Request::TypeIntoElement { selector, text } => {
+            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+                (Some(uia), Some(input)) => {
+                    let w_start = Instant::now();
+                    let r = handle_type_into_element(uia, input, selector, text);
+                    win32_us = w_start.elapsed().as_micros() as i64;
+                    r.unwrap_or_else(Response::Error)
+                }
+                _ => Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "uia pool or input thread unavailable".to_string(),
+                )),
+            }
+        }
+        Request::WaitForElement { selector, timeout_ms } => match ctx.uia.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool unavailable".to_string(),
+            )),
+            Some(uia) => {
+                let w_start = Instant::now();
+                let r = handle_wait_for_element(uia, selector, timeout_ms);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::ScrollIntoView { selector } => match ctx.uia.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool unavailable".to_string(),
+            )),
+            Some(uia) => {
+                let w_start = Instant::now();
+                let r = handle_scroll_into_view(uia, selector);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
     };
 
     DispatchResult {
