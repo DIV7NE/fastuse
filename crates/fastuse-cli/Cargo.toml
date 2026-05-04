@@ -13,7 +13,7 @@ path = "src/main.rs"
 fastuse-proto = { path = "../fastuse-proto" }
 fastuse-core = { path = "../fastuse-core" }
 fastuse-win = { path = "../fastuse-win" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 interprocess = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
