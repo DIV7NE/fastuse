@@ -326,6 +326,16 @@ pub struct KillProcessArgs {
     pub process_tree: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClipboardSetImageArgs {
+    /// MIME type: "image/png" or "image/jpeg".
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded image bytes (PNG or JPEG).
+    pub data_b64: String,
+}
+
 // ---------- Phase 4 output schemas ----------
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -689,6 +699,47 @@ impl Fastuse {
     #[tool(name = "clipboard_set_text", description = "Write text to the clipboard. Payload is wrapped in Redact<> end-to-end.")]
     async fn clipboard_set_text(&self, Parameters(args): Parameters<ClipboardSetTextArgs>) -> Result<Json<AckOutput>, McpError> {
         let req = Request::ClipboardSet(fastuse_proto::ClipboardSet::Text(Redact::new(args.text)));
+        match self.call(req).await? {
+            Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "clipboard_get_image", description = "Read an image from the clipboard. Decodes CF_DIBV5 and returns base64-encoded PNG. Returns an error if no image is present.")]
+    async fn clipboard_get_image(&self) -> Result<Json<ScreenshotOutput>, McpError> {
+        let req = Request::ClipboardGet(fastuse_proto::ClipboardGet {
+            format: Some(fastuse_proto::ClipFormat::Image),
+        });
+        match self.call(req).await? {
+            Response::ClipboardGet(fastuse_proto::ClipboardGetResp::Image { mime, base64, w, h }) => {
+                Ok(Json(ScreenshotOutput {
+                    mime,
+                    width: w,
+                    height: h,
+                    data_b64: base64.into_inner(),
+                }))
+            }
+            Response::ClipboardGet(_) => {
+                Err(McpError::internal_error("no image on clipboard".to_string(), None))
+            }
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "clipboard_set_image", description = "Write a base64-encoded PNG or JPEG image to the clipboard as CF_DIBV5.")]
+    async fn clipboard_set_image(&self, Parameters(args): Parameters<ClipboardSetImageArgs>) -> Result<Json<AckOutput>, McpError> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&args.data_b64)
+            .map_err(|e| McpError::invalid_params(format!("data_b64: {e}"), None))?;
+        let req = Request::ClipboardSet(fastuse_proto::ClipboardSet::Image {
+            mime: args.mime,
+            bytes: Redact::new(bytes),
+            w: args.width,
+            h: args.height,
+        });
         match self.call(req).await? {
             Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
