@@ -13,6 +13,7 @@ pub mod com;
 pub mod dpi;
 pub mod input;
 pub mod input_thread;
+pub mod uia;
 pub mod uia_pool;
 pub mod capture_thread;
 pub mod window;
