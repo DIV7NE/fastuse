@@ -293,12 +293,12 @@ pub enum Response {
     Windows(Vec<WindowInfo>),
 
     // --- Phase 3: capture ---
-    /// Encoded image payload. Bytes are base64 (STANDARD) at the MCP edge;
-    /// over the postcard pipe they remain raw `Vec<u8>` to avoid double
-    /// encoding cost.
+    /// Encoded image payload. Wrapped in `Redact<Vec<u8>>` per T-03-03 so
+    /// raw pixel bytes never appear in tracing/Debug; the MCP edge unwraps
+    /// and base64-encodes for the JSON content block.
     Screenshot {
-        /// Raw encoded bytes (JPEG or PNG). MCP edge re-encodes to base64.
-        bytes: Vec<u8>,
+        /// Encoded bytes (JPEG or PNG). MCP edge re-encodes to base64.
+        bytes: Redact<Vec<u8>>,
         /// MIME type (`image/jpeg` or `image/png`).
         mime: String,
         /// Width in physical pixels.
@@ -549,7 +549,7 @@ mod tests {
         let nodes = vec![crate::uia_node::UIANode::empty()];
         let cases = vec![
             Response::Screenshot {
-                bytes: vec![1, 2, 3],
+                bytes: Redact::new(vec![1, 2, 3]),
                 mime: "image/jpeg".into(),
                 width: 1920,
                 height: 1080,
