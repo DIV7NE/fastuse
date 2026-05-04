@@ -176,12 +176,19 @@ fn main() {
         }
     };
 
-    // Best-effort warmup: touch D3D11, DXGI, UIA root, monitor enum before the
-    // first client connect so the first real tool call is already hot.
-    let _ = warmup::run(
-        uia.as_ref().map(|a| &**a),
-        capture.as_ref().map(|a| &**a),
-    );
+    // Best-effort warmup runs in a background thread once the pipe server is
+    // up — running it on the spawn path can deadlock first-call DXGI duplication
+    // before the pipe is bound, so the CLI never sees the daemon.
+    {
+        let uia_w = uia.clone();
+        let capture_w = capture.clone();
+        std::thread::spawn(move || {
+            let _ = warmup::run(
+                uia_w.as_ref().map(|a| &**a),
+                capture_w.as_ref().map(|a| &**a),
+            );
+        });
+    }
 
     // Build tokio runtime and run the pipe server (Task 7 wires server::serve).
     let rt = match tokio::runtime::Builder::new_multi_thread()
