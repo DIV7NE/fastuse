@@ -9,13 +9,14 @@
 #![deny(missing_docs)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
+pub mod capture;
+pub mod capture_thread;
 pub mod com;
 pub mod dpi;
 pub mod input;
 pub mod input_thread;
 pub mod uia;
 pub mod uia_pool;
-pub mod capture_thread;
 pub mod window;
 
 pub use com::increment_mta_once;
