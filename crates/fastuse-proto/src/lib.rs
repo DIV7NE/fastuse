@@ -15,10 +15,17 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+pub mod chord;
+pub mod coords;
 pub mod error;
 pub mod redact;
 pub mod wire;
 
+pub use chord::{parse_chord, Chord, ChordError, ChordKey, ModKey};
+pub use coords::{MonitorInfo, MouseButton, Rect, ScrollDirection, WindowInfo};
 pub use error::{Error, ErrorCode};
 pub use redact::{Redact, RedactLen};
-pub use wire::{decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, FrameError, MAX_FRAME_BYTES, Request, Response};
+pub use wire::{
+    decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, FrameError,
+    Request, Response, MAX_FRAME_BYTES,
+};

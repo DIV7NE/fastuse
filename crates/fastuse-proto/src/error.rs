@@ -24,6 +24,16 @@ pub enum ErrorCode {
     ProtocolVersionMismatch,
     /// Catch-all for unexpected internal errors.
     Internal,
+    /// Target HWND is not a live top-level window (Phase 2).
+    WindowNotFound,
+    /// No monitor contains the requested coordinates / id (Phase 2).
+    MonitorNotFound,
+    /// SendInput accepted fewer events than requested — likely a low-level
+    /// hook (anti-cheat, password manager, screen reader) is dropping input
+    /// (Phase 2).
+    InputBlockedHang,
+    /// Chord string failed to parse (Phase 2).
+    InvalidChord,
 }
 
 impl ErrorCode {
@@ -37,6 +47,10 @@ impl ErrorCode {
             Self::Timeout => "TIMEOUT",
             Self::ProtocolVersionMismatch => "PROTOCOL_VERSION_MISMATCH",
             Self::Internal => "INTERNAL",
+            Self::WindowNotFound => "WINDOW_NOT_FOUND",
+            Self::MonitorNotFound => "MONITOR_NOT_FOUND",
+            Self::InputBlockedHang => "INPUT_BLOCKED_HANG",
+            Self::InvalidChord => "INVALID_CHORD",
         }
     }
 }
@@ -96,6 +110,10 @@ mod tests {
             ErrorCode::Timeout,
             ErrorCode::ProtocolVersionMismatch,
             ErrorCode::Internal,
+            ErrorCode::WindowNotFound,
+            ErrorCode::MonitorNotFound,
+            ErrorCode::InputBlockedHang,
+            ErrorCode::InvalidChord,
         ] {
             let err = Error::new(code, "test message");
             let bytes = encode_frame(&err).unwrap();
@@ -116,5 +134,9 @@ mod tests {
         assert_eq!(ErrorCode::Timeout.as_str(), "TIMEOUT");
         assert_eq!(ErrorCode::ProtocolVersionMismatch.as_str(), "PROTOCOL_VERSION_MISMATCH");
         assert_eq!(ErrorCode::Internal.as_str(), "INTERNAL");
+        assert_eq!(ErrorCode::WindowNotFound.as_str(), "WINDOW_NOT_FOUND");
+        assert_eq!(ErrorCode::MonitorNotFound.as_str(), "MONITOR_NOT_FOUND");
+        assert_eq!(ErrorCode::InputBlockedHang.as_str(), "INPUT_BLOCKED_HANG");
+        assert_eq!(ErrorCode::InvalidChord.as_str(), "INVALID_CHORD");
     }
 }

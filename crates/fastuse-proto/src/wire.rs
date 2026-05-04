@@ -6,7 +6,9 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
+use crate::coords::{MonitorInfo, MouseButton, ScrollDirection, WindowInfo};
 use crate::error::Error;
+use crate::redact::Redact;
 
 /// Hard cap on a single frame payload. Per threat T-01-02, an oversized
 /// length-prefix declared by an attacker MUST NOT cause unbounded allocation.
@@ -16,7 +18,7 @@ pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 ///
 /// Phase 1 ships only `Hello`, `Ping`, `Shutdown`. Later phases add tool
 /// variants (Click, Type, Screenshot, etc.) by appending — NEVER renumber.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     /// First-connect handshake (D-22).
     Hello {
@@ -34,10 +36,137 @@ pub enum Request {
     },
     /// Cooperative shutdown (used by `fastuse-cli stop`, D-04).
     Shutdown,
+
+    // --- Phase 2: input primitives ---
+    /// Click at `(x, y)` with `button` `count` times, optionally with held
+    /// modifiers around the click. `skip_set_cursor_pos` opts out of the
+    /// `SetCursorPos` pre-pass used to defeat games / Electron.
+    Click {
+        /// Target x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Target y in physical pixels (virtual-desktop origin).
+        y: i32,
+        /// Mouse button to actuate.
+        button: MouseButton,
+        /// Number of full DOWN/UP cycles to perform.
+        count: u8,
+        /// Modifier chord tokens (e.g. `["ctrl", "shift"]`).
+        modifiers: Vec<String>,
+        /// If true, skip the implicit `SetCursorPos` before injecting clicks.
+        skip_set_cursor_pos: bool,
+    },
+    /// Move the cursor to `(x, y)` (no click).
+    MouseMove {
+        /// Target x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Target y in physical pixels (virtual-desktop origin).
+        y: i32,
+    },
+    /// Press (DOWN) the given mouse button at the current cursor position.
+    MouseDown {
+        /// Button to press.
+        button: MouseButton,
+    },
+    /// Release (UP) the given mouse button at the current cursor position.
+    MouseUp {
+        /// Button to release.
+        button: MouseButton,
+    },
+    /// Click-drag from `(start_x, start_y)` to `(end_x, end_y)` with `button`
+    /// held. Modifiers are held for the entire drag.
+    Drag {
+        /// Drag start x in physical pixels.
+        start_x: i32,
+        /// Drag start y in physical pixels.
+        start_y: i32,
+        /// Drag end x in physical pixels.
+        end_x: i32,
+        /// Drag end y in physical pixels.
+        end_y: i32,
+        /// Mouse button held during the drag.
+        button: MouseButton,
+        /// Modifier chord tokens to hold during the drag.
+        modifiers: Vec<String>,
+    },
+    /// Mouse-wheel scroll at `(x, y)` in `direction` for `amount` notches
+    /// (one notch = `WHEEL_DELTA` = 120).
+    Scroll {
+        /// Target x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Target y in physical pixels (virtual-desktop origin).
+        y: i32,
+        /// Direction of scroll.
+        direction: ScrollDirection,
+        /// Number of wheel notches.
+        amount: i32,
+        /// Modifier chord tokens to hold during the scroll.
+        modifiers: Vec<String>,
+    },
+    /// Type literal Unicode text via `KEYEVENTF_UNICODE`. Payload is wrapped
+    /// in `Redact<T>` so logs never expose it.
+    Type {
+        /// Unicode payload to type, redacted from `Display`/`Debug` (D-10).
+        text: Redact<String>,
+    },
+    /// Press a chord (e.g. `"ctrl+s"`, `"alt+f4"`, `"win+d"`) `repeat` times.
+    Key {
+        /// Chord string parsed by `fastuse_proto::chord::parse_chord`.
+        chord: String,
+        /// Number of full DOWN/UP cycles for the primary key.
+        repeat: u32,
+    },
+    /// Press a chord and hold for `duration_ms` milliseconds before release.
+    HoldKey {
+        /// Chord string parsed by `fastuse_proto::chord::parse_chord`.
+        chord: String,
+        /// Hold duration in milliseconds.
+        duration_ms: u32,
+    },
+    /// Sleep `duration_ms` server-side (does NOT occupy the input thread).
+    Wait {
+        /// Sleep duration in milliseconds.
+        duration_ms: u32,
+    },
+
+    // --- Phase 2: window/monitor primitives ---
+    /// Enumerate display monitors (cached + invalidated on `WM_DISPLAYCHANGE`).
+    ListMonitors,
+    /// Read the current cursor position and the monitor it lies on.
+    CursorPosition,
+    /// Return `WindowInfo` for the foreground window.
+    ForegroundWindow,
+    /// Enumerate top-level windows, filtered by optional process name and
+    /// title substring.
+    ListWindows {
+        /// Substring filter on `process_name` (case-insensitive).
+        process_name: Option<String>,
+        /// Substring filter on `title` (case-insensitive).
+        title_substring: Option<String>,
+        /// If true (default), only `IsWindowVisible` windows are returned.
+        visible_only: bool,
+    },
+    /// Bring the given HWND to the foreground (AttachThreadInput dance).
+    FocusWindow {
+        /// HWND cast to `u64`.
+        hwnd: u64,
+    },
+    /// Move + resize the window in physical-pixel virtual-desktop space.
+    ResizeMoveWindow {
+        /// HWND cast to `u64`.
+        hwnd: u64,
+        /// New top-left x in physical pixels.
+        x: i32,
+        /// New top-left y in physical pixels.
+        y: i32,
+        /// New width in physical pixels.
+        w: i32,
+        /// New height in physical pixels.
+        h: i32,
+    },
 }
 
 /// All responses sent daemon → client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
     /// Handshake reply (D-22).
     Welcome {
@@ -57,6 +186,30 @@ pub enum Response {
     },
     /// Structured error.
     Error(Error),
+
+    // --- Phase 2 ---
+    /// Generic acknowledgement — used by `Wait`, `Click`, `Type`, etc. when
+    /// no payload is needed. `slept_us` is populated by `Wait` only.
+    Ack {
+        /// Microseconds actually slept (only set by `Wait`).
+        slept_us: Option<u64>,
+    },
+    /// Result of `ListMonitors`.
+    Monitors(Vec<MonitorInfo>),
+    /// Result of `CursorPosition`.
+    CursorPos {
+        /// Cursor x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Cursor y in physical pixels (virtual-desktop origin).
+        y: i32,
+        /// Monitor id (HMONITOR cast to `u64`) the point lies on
+        /// (`MonitorFromPoint`, `MONITOR_DEFAULTTONEAREST`).
+        monitor_id: u64,
+    },
+    /// Result of `ForegroundWindow`.
+    Window(WindowInfo),
+    /// Result of `ListWindows`.
+    Windows(Vec<WindowInfo>),
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in
