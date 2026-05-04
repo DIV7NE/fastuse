@@ -131,9 +131,18 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             });
             finalize(inner, opts, ctx)
         }
-        Request::MouseMove { x, y, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_move(x, y)),
-        Request::MouseDown { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_down(button)),
-        Request::MouseUp { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_up(button)),
+        Request::MouseMove { x, y, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || ih::mouse_move(x, y));
+            finalize(inner, opts, ctx)
+        }
+        Request::MouseDown { button, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || ih::mouse_down(button));
+            finalize(inner, opts, ctx)
+        }
+        Request::MouseUp { button, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || ih::mouse_up(button));
+            finalize(inner, opts, ctx)
+        }
         Request::Drag {
             start_x,
             start_y,
@@ -141,28 +150,41 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             end_y,
             button,
             modifiers,
-            opts: _,
-        } => run_unit(ctx, &mut win32_us, move || {
-            ih::drag(start_x, start_y, end_x, end_y, button, &modifiers)
-        }),
+            opts,
+        } => {
+            let inner = run_unit(ctx, &mut win32_us, move || {
+                ih::drag(start_x, start_y, end_x, end_y, button, &modifiers)
+            });
+            finalize(inner, opts, ctx)
+        }
         Request::Scroll {
             x,
             y,
             direction,
             amount,
             modifiers,
-            opts: _,
-        } => run_unit(ctx, &mut win32_us, move || {
-            ih::scroll(x, y, direction, amount, &modifiers)
-        }),
-        Request::Type { text, opts: _ } => {
+            opts,
+        } => {
+            let inner = run_unit(ctx, &mut win32_us, move || {
+                ih::scroll(x, y, direction, amount, &modifiers)
+            });
+            finalize(inner, opts, ctx)
+        }
+        Request::Type { text, opts } => {
             // Expose the redacted payload only inside this scope; never log it.
             let payload = text.into_inner();
             tracing::debug!(text_len = payload.len(), "type tool dispatch");
-            run_unit(ctx, &mut win32_us, move || ih::type_text(&payload))
+            let inner = run_unit(ctx, &mut win32_us, move || ih::type_text(&payload));
+            finalize(inner, opts, ctx)
         }
-        Request::Key { chord, repeat, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::key(&chord, repeat)),
-        Request::HoldKey { chord, duration_ms, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::hold_key(&chord, duration_ms)),
+        Request::Key { chord, repeat, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || ih::key(&chord, repeat));
+            finalize(inner, opts, ctx)
+        }
+        Request::HoldKey { chord, duration_ms, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || ih::hold_key(&chord, duration_ms));
+            finalize(inner, opts, ctx)
+        }
         Request::Wait { duration_ms } => {
             // Handled directly on the dispatch thread (NOT the input thread)
             // so concurrent input calls aren't blocked by sleeps.
@@ -189,9 +211,13 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             list_windows(process_name.as_deref(), title_substring.as_deref(), visible_only)
         })
         .map_or_else(Response::Error, Response::Windows),
-        Request::FocusWindow { hwnd, opts: _ } => run_unit(ctx, &mut win32_us, move || focus_window(hwnd)),
-        Request::ResizeMoveWindow { hwnd, x, y, w, h, opts: _ } => {
-            run_unit(ctx, &mut win32_us, move || resize_move_window(hwnd, x, y, w, h))
+        Request::FocusWindow { hwnd, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || focus_window(hwnd));
+            finalize(inner, opts, ctx)
+        }
+        Request::ResizeMoveWindow { hwnd, x, y, w, h, opts } => {
+            let inner = run_unit(ctx, &mut win32_us, move || resize_move_window(hwnd, x, y, w, h));
+            finalize(inner, opts, ctx)
         }
 
         // -------- Phase 4: system surface (gated by perm::resolve) --------
@@ -212,12 +238,12 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             .await
             .into_response_or_err(&mut win32_us)
         }
-        Request::ClipboardSet { req: s, opts: _ } => {
+        Request::ClipboardSet { req: s, opts } => {
             let tool = match &s {
                 ClipboardSet::Text(_) => "clipboard_set_text",
                 ClipboardSet::Image { .. } => "clipboard_set_image",
             };
-            gate_then(tool, None, ctx, move |_| {
+            let inner = gate_then(tool, None, ctx, move |_| {
                 let w = Instant::now();
                 let r = fastuse_win::clipboard::clipboard_set(s);
                 (
@@ -226,7 +252,8 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 )
             })
             .await
-            .into_response_or_err(&mut win32_us)
+            .into_response_or_err(&mut win32_us);
+            finalize(inner, opts, ctx)
         }
         Request::ShellExec(se) => {
             let tier = perm::resolve("shell_exec", None, ctx.session.allow());
@@ -244,9 +271,9 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 }
             }
         }
-        Request::LaunchApp { req: la, opts: _ } => {
+        Request::LaunchApp { req: la, opts } => {
             let target = la.query.clone();
-            gate_then("launch_app", Some(&target), ctx, move |_| {
+            let inner = gate_then("launch_app", Some(&target), ctx, move |_| {
                 let w = Instant::now();
                 let r = fastuse_win::launch::launch_app(la);
                 (
@@ -255,7 +282,8 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 )
             })
             .await
-            .into_response_or_err(&mut win32_us)
+            .into_response_or_err(&mut win32_us);
+            finalize(inner, opts, ctx)
         }
         Request::ListProcesses(lp) => {
             // list_processes is Free — no gate.
@@ -358,8 +386,8 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
-        Request::ClickElement { selector, modifiers, opts: _ } => {
-            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+        Request::ClickElement { selector, modifiers, opts } => {
+            let inner = match (ctx.uia.as_ref(), ctx.input.as_ref()) {
                 (Some(uia), Some(input)) => {
                     let w_start = Instant::now();
                     let r = handle_click_element(uia, input, selector, modifiers);
@@ -370,10 +398,11 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                     ErrorCode::Internal,
                     "uia pool or input thread unavailable".to_string(),
                 )),
-            }
+            };
+            finalize(inner, opts, ctx)
         }
-        Request::TypeIntoElement { selector, text, opts: _ } => {
-            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+        Request::TypeIntoElement { selector, text, opts } => {
+            let inner = match (ctx.uia.as_ref(), ctx.input.as_ref()) {
                 (Some(uia), Some(input)) => {
                     let w_start = Instant::now();
                     let r = handle_type_into_element(uia, input, selector, text);
@@ -384,7 +413,8 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                     ErrorCode::Internal,
                     "uia pool or input thread unavailable".to_string(),
                 )),
-            }
+            };
+            finalize(inner, opts, ctx)
         }
         Request::WaitForElement { selector, timeout_ms } => match ctx.uia.as_ref() {
             None => Response::Error(Error::new(
@@ -398,18 +428,21 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
-        Request::ScrollIntoView { selector, opts: _ } => match ctx.uia.as_ref() {
-            None => Response::Error(Error::new(
-                ErrorCode::Internal,
-                "uia pool unavailable".to_string(),
-            )),
-            Some(uia) => {
-                let w_start = Instant::now();
-                let r = handle_scroll_into_view(uia, selector);
-                win32_us = w_start.elapsed().as_micros() as i64;
-                r.unwrap_or_else(Response::Error)
-            }
-        },
+        Request::ScrollIntoView { selector, opts } => {
+            let inner = match ctx.uia.as_ref() {
+                None => Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "uia pool unavailable".to_string(),
+                )),
+                Some(uia) => {
+                    let w_start = Instant::now();
+                    let r = handle_scroll_into_view(uia, selector);
+                    win32_us = w_start.elapsed().as_micros() as i64;
+                    r.unwrap_or_else(Response::Error)
+                }
+            };
+            finalize(inner, opts, ctx)
+        }
     };
 
     DispatchResult {
