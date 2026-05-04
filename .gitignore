@@ -1,0 +1,23 @@
+# GSD planning artifacts (local-only, not tracked)
+.planning/
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Env / secrets
+.env
+.env.local
+*.local
