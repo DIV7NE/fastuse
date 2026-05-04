@@ -10,13 +10,14 @@
 
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, MAX_PATH};
 use windows::Win32::Security::{
     GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
-use windows::Win32::System::ProcessStatus::{GetModuleBaseNameW};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -66,6 +67,9 @@ fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
         return Err(());
     }
     let mut buf = vec![0u8; needed as usize];
+    // CR-05 defense-in-depth: separate `written` output so the Win32 contract
+    // for ReturnLength doesn't conflate with the input buffer length.
+    let mut written: u32 = needed;
     // SAFETY: buf is sized per the previous query; ptr is valid for `needed` bytes.
     unsafe {
         GetTokenInformation(
@@ -73,9 +77,12 @@ fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
             TokenIntegrityLevel,
             Some(buf.as_mut_ptr() as *mut _),
             needed,
-            &mut needed,
+            &mut written,
         )
         .map_err(|_| ())?;
+    }
+    if written as usize > buf.len() {
+        return Err(());
     }
     // The buffer holds a TOKEN_MANDATORY_LABEL whose Label.Sid points into
     // the same buffer. Walk the SID's last sub-authority.
@@ -88,7 +95,17 @@ fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
     if sid.is_invalid() {
         return Err(());
     }
-    // SAFETY: SID is a valid pointer per Windows TOKEN_MANDATORY_LABEL contract.
+    // CR-05 defense-in-depth: clamp SID-walking arithmetic to the buffer.
+    // The TOKEN_MANDATORY_LABEL.Label.Sid points into `buf`; verify all reads
+    // we'll make stay inside `buf[..written]`.
+    let buf_start = buf.as_ptr() as usize;
+    let buf_end = buf_start + (written as usize).min(buf.len());
+    let sid_addr = sid.0 as usize;
+    if sid_addr < buf_start || sid_addr + 8 > buf_end {
+        return Err(());
+    }
+    // SAFETY: SID is a valid pointer per Windows TOKEN_MANDATORY_LABEL contract,
+    // and bounds against `buf_end` are checked above.
     unsafe {
         // SubAuthorityCount is at offset 1 (u8); SubAuthority array begins
         // at offset 8 (4-byte revision + 4-byte identifierauthority padding).
@@ -97,6 +114,11 @@ fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
         // We replicate `GetSidSubAuthority(sid, count - 1)` manually.
         let count_byte = *(sid.0.add(1) as *const u8);
         if count_byte == 0 {
+            return Err(());
+        }
+        // Confirm the SubAuthority array fits inside the buffer.
+        let needed_end = sid_addr + 8 + 4 * (count_byte as usize);
+        if needed_end > buf_end {
             return Err(());
         }
         // SubAuthority array starts at offset 8 from sid.0.
@@ -168,15 +190,31 @@ pub fn check_foreground_integrity() -> Result<(), ProtoError> {
 }
 
 fn process_basename(proc: HANDLE) -> Option<String> {
-    let mut buf = [0u16; 512];
-    // SAFETY: buf is on the stack; len is in u16 units per win32 contract.
-    let n = unsafe {
-        GetModuleBaseNameW(proc, None, &mut buf)
+    // QueryFullProcessImageNameW works with PROCESS_QUERY_LIMITED_INFORMATION
+    // (GetModuleBaseNameW requires PROCESS_VM_READ which we deliberately do
+    // not request — Phase-2 SUMMARY §"Auto-Fixed Issues #2", same fix as
+    // window/mod.rs::process_basename).
+    let mut buf = vec![0u16; MAX_PATH as usize];
+    let mut len: u32 = buf.len() as u32;
+    // SAFETY: proc is a valid handle; buf/len describe the output buffer.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            proc,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
     };
-    if n == 0 {
+    if ok.is_err() || len == 0 {
         return None;
     }
-    Some(String::from_utf16_lossy(&buf[..n as usize]))
+    let full = String::from_utf16_lossy(&buf[..len as usize]);
+    // Basename: strip everything up to and including the last backslash.
+    Some(
+        full.rsplit_once('\\')
+            .map(|(_, b)| b.to_string())
+            .unwrap_or(full),
+    )
 }
 
 fn integrity_label(level: u32) -> &'static str {
