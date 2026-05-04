@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
-use fastuse_proto::{ImageFormat, Redact, Request, Response, Selector, TreeView};
+use fastuse_proto::{ActionOpts, ImageFormat, Redact, Request, Response, Selector, TreeView};
 use serde_json::json;
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
+use crate::cmd_phase2::print_action_or_ack;
 use crate::proto_io::{read_response, write_request};
 use crate::spawn::connect_or_spawn;
 
@@ -191,6 +192,7 @@ pub async fn click_element(
     pipe_path: &str,
     selector_json: &str,
     mods: Option<&str>,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
     let selector = parse_selector(selector_json)?;
     let modifiers = mods.map(|s| {
@@ -199,22 +201,23 @@ pub async fn click_element(
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
     });
-    let req = Request::ClickElement { selector, modifiers, opts: None };
-    print_match(one_call(pipe_path, req).await?)
+    let req = Request::ClickElement { selector, modifiers, opts };
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
 pub async fn type_into_element(
     pipe_path: &str,
     selector_json: &str,
     text: String,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
     let selector = parse_selector(selector_json)?;
     let req = Request::TypeIntoElement {
         selector,
         text: Redact::new(text),
-        opts: None,
+        opts,
     };
-    print_match(one_call(pipe_path, req).await?)
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
 pub async fn wait_for_element(
@@ -230,10 +233,10 @@ pub async fn wait_for_element(
     print_match(one_call(pipe_path, req).await?)
 }
 
-pub async fn scroll_into_view(pipe_path: &str, selector_json: &str) -> anyhow::Result<()> {
+pub async fn scroll_into_view(pipe_path: &str, selector_json: &str, opts: Option<ActionOpts>) -> anyhow::Result<()> {
     let selector = parse_selector(selector_json)?;
-    let req = Request::ScrollIntoView { selector, opts: None };
-    print_match(one_call(pipe_path, req).await?)
+    let req = Request::ScrollIntoView { selector, opts };
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
 fn print_match(res: Response) -> anyhow::Result<()> {

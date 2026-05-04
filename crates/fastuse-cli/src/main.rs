@@ -58,11 +58,15 @@ enum Cmd {
         /// Skip the implicit SetCursorPos pre-move.
         #[arg(long, default_value_t = false)]
         no_cursor: bool,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Type literal Unicode text.
     Type {
         /// Text to type. Wrapped in Redact<> end-to-end (D-10).
         text: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Press a chord (e.g. ctrl+s).
     Key {
@@ -71,6 +75,8 @@ enum Cmd {
         /// Number of full DOWN/UP cycles for the primary key.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Press a chord and hold for --ms milliseconds.
     HoldKey {
@@ -79,6 +85,8 @@ enum Cmd {
         /// Hold duration.
         #[arg(long)]
         ms: u32,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Move the cursor.
     MouseMove {
@@ -86,18 +94,24 @@ enum Cmd {
         x: i32,
         /// Target y in physical pixels.
         y: i32,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Mouse-button DOWN at the current cursor position.
     MouseDown {
         /// Button: left | right | middle.
         #[arg(long, default_value = "left")]
         button: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Mouse-button UP at the current cursor position.
     MouseUp {
         /// Button: left | right | middle.
         #[arg(long, default_value = "left")]
         button: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Click-and-drag from start to end.
     Drag {
@@ -115,6 +129,8 @@ enum Cmd {
         /// Modifiers held during drag.
         #[arg(long)]
         mods: Option<String>,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Scroll at coords.
     Scroll {
@@ -131,6 +147,8 @@ enum Cmd {
         /// Modifiers held during scroll.
         #[arg(long)]
         mods: Option<String>,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Server-side sleep.
     Wait {
@@ -159,6 +177,8 @@ enum Cmd {
     FocusWindow {
         /// HWND as decimal or 0x-prefixed hex.
         hwnd: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Move + resize a window.
     ResizeMoveWindow {
@@ -172,6 +192,8 @@ enum Cmd {
         w: i32,
         /// New height in physical pixels.
         h: i32,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
 
     // ----- Phase 3: capture -----
@@ -243,6 +265,8 @@ enum Cmd {
         /// Modifier list, e.g. ctrl,shift.
         #[arg(long)]
         mods: Option<String>,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Find an element via selector, focus it, type text.
     TypeIntoElement {
@@ -250,6 +274,8 @@ enum Cmd {
         selector: String,
         /// Text to type (Redact<>-wrapped end-to-end).
         text: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
     /// Poll for an element until it appears or timeout.
     WaitForElement {
@@ -263,6 +289,8 @@ enum Cmd {
     ScrollIntoView {
         /// Selector JSON.
         selector: String,
+        #[command(flatten)]
+        opts: ActionOptsArgs,
     },
 
     // ----- Phase 4: clipboard / shell / launch / processes -----
@@ -318,6 +346,56 @@ enum Cmd {
     Warmup,
 }
 
+#[derive(clap::Args, Debug, Clone, Default)]
+struct ActionOptsArgs {
+    /// Selector JSON to poll for after the action.
+    #[arg(long)]
+    wait_for: Option<String>,
+    /// Selector JSON to verify; if it doesn't match, action is reported failed.
+    #[arg(long)]
+    verify: Option<String>,
+    /// Capture a screenshot after the action.
+    #[arg(long, default_value_t = false)]
+    screenshot_after: bool,
+    /// "auto" or "full"; default "auto".
+    #[arg(long)]
+    screenshot_region: Option<String>,
+    /// "jpeg" (default) or "png".
+    #[arg(long)]
+    screenshot_format: Option<String>,
+    /// Wait timeout (ms); default 2000.
+    #[arg(long)]
+    wait_timeout_ms: Option<u32>,
+}
+
+fn build_action_opts(a: ActionOptsArgs) -> anyhow::Result<Option<fastuse_proto::ActionOpts>> {
+    if a.wait_for.is_none() && a.verify.is_none() && !a.screenshot_after {
+        return Ok(None);
+    }
+    let wait_for = a.wait_for.as_deref().map(serde_json::from_str).transpose()?;
+    let verify = a.verify.as_deref().map(serde_json::from_str).transpose()?;
+    let screenshot_after = a.screenshot_after.then(|| {
+        let region = match a.screenshot_region.as_deref() {
+            Some("full") => None,
+            _ => Some(fastuse_proto::RegionSpec::Auto),
+        };
+        fastuse_proto::ScreenshotOpts {
+            region,
+            format: Some(match a.screenshot_format.as_deref() {
+                Some("png") => fastuse_proto::ImageFormat::Png,
+                _ => fastuse_proto::ImageFormat::Jpeg,
+            }),
+            quality: None,
+        }
+    });
+    Ok(Some(fastuse_proto::ActionOpts {
+        wait_for,
+        screenshot_after,
+        verify,
+        wait_timeout_ms: a.wait_timeout_ms,
+    }))
+}
+
 fn parse_hwnd(s: &str) -> anyhow::Result<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -350,31 +428,57 @@ fn main() {
             Cmd::Start => cmd_start::run(&identity.path).await,
             Cmd::Stop => cmd_stop::run(&identity.path).await,
             Cmd::Status => cmd_status::run(&identity.path).await,
-            Cmd::Click { x, y, button, count, mods, no_cursor } =>
-                cmd_phase2::click(&identity.path, x, y, &button, count, mods.as_deref(), no_cursor).await,
-            Cmd::Type { text } => cmd_phase2::r#type(&identity.path, text).await,
-            Cmd::Key { chord, repeat } => cmd_phase2::key(&identity.path, chord, repeat).await,
-            Cmd::HoldKey { chord, ms } => cmd_phase2::hold_key(&identity.path, chord, ms).await,
-            Cmd::MouseMove { x, y } => cmd_phase2::mouse_move(&identity.path, x, y).await,
-            Cmd::MouseDown { button } => cmd_phase2::mouse_down(&identity.path, &button).await,
-            Cmd::MouseUp { button } => cmd_phase2::mouse_up(&identity.path, &button).await,
-            Cmd::Drag { sx, sy, ex, ey, button, mods } =>
-                cmd_phase2::drag(&identity.path, sx, sy, ex, ey, &button, mods.as_deref()).await,
-            Cmd::Scroll { x, y, dir, amount, mods } =>
-                cmd_phase2::scroll(&identity.path, x, y, &dir, amount, mods.as_deref()).await,
+            Cmd::Click { x, y, button, count, mods, no_cursor, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::click(&identity.path, x, y, &button, count, mods.as_deref(), no_cursor, opts).await
+            }
+            Cmd::Type { text, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::r#type(&identity.path, text, opts).await
+            }
+            Cmd::Key { chord, repeat, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::key(&identity.path, chord, repeat, opts).await
+            }
+            Cmd::HoldKey { chord, ms, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::hold_key(&identity.path, chord, ms, opts).await
+            }
+            Cmd::MouseMove { x, y, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::mouse_move(&identity.path, x, y, opts).await
+            }
+            Cmd::MouseDown { button, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::mouse_down(&identity.path, &button, opts).await
+            }
+            Cmd::MouseUp { button, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::mouse_up(&identity.path, &button, opts).await
+            }
+            Cmd::Drag { sx, sy, ex, ey, button, mods, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::drag(&identity.path, sx, sy, ex, ey, &button, mods.as_deref(), opts).await
+            }
+            Cmd::Scroll { x, y, dir, amount, mods, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::scroll(&identity.path, x, y, &dir, amount, mods.as_deref(), opts).await
+            }
             Cmd::Wait { ms } => cmd_phase2::wait(&identity.path, ms).await,
             Cmd::ListMonitors => cmd_phase2::list_monitors(&identity.path).await,
             Cmd::CursorPosition => cmd_phase2::cursor_position(&identity.path).await,
             Cmd::ForegroundWindow => cmd_phase2::foreground_window(&identity.path).await,
             Cmd::ListWindows { process, title } =>
                 cmd_phase2::list_windows(&identity.path, process, title).await,
-            Cmd::FocusWindow { hwnd } => {
+            Cmd::FocusWindow { hwnd, opts } => {
                 let h = parse_hwnd(&hwnd)?;
-                cmd_phase2::focus_window(&identity.path, h).await
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::focus_window(&identity.path, h, opts).await
             }
-            Cmd::ResizeMoveWindow { hwnd, x, y, w, h } => {
+            Cmd::ResizeMoveWindow { hwnd, x, y, w, h, opts } => {
                 let hw = parse_hwnd(&hwnd)?;
-                cmd_phase2::resize_move_window(&identity.path, hw, x, y, w, h).await
+                let opts = build_action_opts(opts)?;
+                cmd_phase2::resize_move_window(&identity.path, hw, x, y, w, h, opts).await
             }
 
             // ---- Phase 3 ----
@@ -423,17 +527,20 @@ fn main() {
                 cmd_phase3::uia_query(&identity.path, &selector, root).await
             }
             Cmd::InspectAt { x, y } => cmd_phase3::inspect_at_point(&identity.path, x, y).await,
-            Cmd::ClickElement { selector, mods } => {
-                cmd_phase3::click_element(&identity.path, &selector, mods.as_deref()).await
+            Cmd::ClickElement { selector, mods, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase3::click_element(&identity.path, &selector, mods.as_deref(), opts).await
             }
-            Cmd::TypeIntoElement { selector, text } => {
-                cmd_phase3::type_into_element(&identity.path, &selector, text).await
+            Cmd::TypeIntoElement { selector, text, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase3::type_into_element(&identity.path, &selector, text, opts).await
             }
             Cmd::WaitForElement { selector, timeout_ms } => {
                 cmd_phase3::wait_for_element(&identity.path, &selector, timeout_ms).await
             }
-            Cmd::ScrollIntoView { selector } => {
-                cmd_phase3::scroll_into_view(&identity.path, &selector).await
+            Cmd::ScrollIntoView { selector, opts } => {
+                let opts = build_action_opts(opts)?;
+                cmd_phase3::scroll_into_view(&identity.path, &selector, opts).await
             }
 
             // ---- Phase 4 ----

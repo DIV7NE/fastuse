@@ -8,7 +8,7 @@
 
 use fastuse_proto::{
     coords::{MouseButton, ScrollDirection},
-    Redact, Request, Response,
+    ActionOpts, Redact, Request, Response,
 };
 use serde_json::json;
 use tokio::net::windows::named_pipe::NamedPipeClient;
@@ -62,6 +62,51 @@ fn ok_ack(slept_us: Option<u64>) {
     println!("{}", json!({"ok": true, "slept_us": slept_us}));
 }
 
+pub(crate) fn print_action_or_ack(res: Response) -> anyhow::Result<()> {
+    match res {
+        Response::Ack { slept_us } => {
+            println!("{}", json!({"ok": true, "slept_us": slept_us}));
+            Ok(())
+        }
+        Response::Element { matched } => {
+            println!("{}", json!({"ok": true, "matched": matched}));
+            Ok(())
+        }
+        Response::ActionResult { ok, wait_matched, waited_ms, screenshot } => {
+            use base64::Engine;
+            let screenshot = screenshot.map(|s| {
+                let s = *s;
+                json!({
+                    "mime": s.mime,
+                    "width": s.width,
+                    "height": s.height,
+                    "data_b64": base64::engine::general_purpose::STANDARD.encode(s.bytes.into_inner()),
+                })
+            });
+            println!("{}", json!({
+                "ok": ok,
+                "wait_matched": wait_matched,
+                "waited_ms": waited_ms,
+                "screenshot": screenshot,
+            }));
+            Ok(())
+        }
+        Response::Error(e) => {
+            let body = json!({
+                "ok": false,
+                "error": {
+                    "code": e.code.as_str(),
+                    "message": e.message,
+                    "hint": e.hint,
+                }
+            });
+            eprintln!("{}", body);
+            std::process::exit(1);
+        }
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 fn print_response(res: Response) -> anyhow::Result<()> {
     match res {
         Response::Ack { slept_us } => ok_ack(slept_us),
@@ -97,6 +142,7 @@ pub async fn click(
     count: u8,
     mods: Option<&str>,
     no_cursor: bool,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
     let req = Request::Click {
         x,
@@ -105,33 +151,33 @@ pub async fn click(
         count,
         modifiers: parse_mods(mods),
         skip_set_cursor_pos: no_cursor,
-        opts: None,
+        opts,
     };
-    print_response(one_call(pipe_path, req).await?)
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
-pub async fn r#type(pipe_path: &str, text: String) -> anyhow::Result<()> {
-    let req = Request::Type { text: Redact::new(text), opts: None };
-    print_response(one_call(pipe_path, req).await?)
+pub async fn r#type(pipe_path: &str, text: String, opts: Option<ActionOpts>) -> anyhow::Result<()> {
+    let req = Request::Type { text: Redact::new(text), opts };
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
-pub async fn key(pipe_path: &str, chord: String, repeat: u32) -> anyhow::Result<()> {
+pub async fn key(pipe_path: &str, chord: String, repeat: u32, opts: Option<ActionOpts>) -> anyhow::Result<()> {
     // Early-fail on InvalidChord (CONTEXT.md: shared parser).
     let _ = fastuse_proto::parse_chord(&chord)
         .map_err(|e| anyhow::anyhow!("invalid chord {chord:?}: {e}"))?;
-    let req = Request::Key { chord, repeat, opts: None };
-    print_response(one_call(pipe_path, req).await?)
+    let req = Request::Key { chord, repeat, opts };
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
-pub async fn hold_key(pipe_path: &str, chord: String, ms: u32) -> anyhow::Result<()> {
+pub async fn hold_key(pipe_path: &str, chord: String, ms: u32, opts: Option<ActionOpts>) -> anyhow::Result<()> {
     let _ = fastuse_proto::parse_chord(&chord)
         .map_err(|e| anyhow::anyhow!("invalid chord {chord:?}: {e}"))?;
-    let req = Request::HoldKey { chord, duration_ms: ms, opts: None };
-    print_response(one_call(pipe_path, req).await?)
+    let req = Request::HoldKey { chord, duration_ms: ms, opts };
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
-pub async fn mouse_move(pipe_path: &str, x: i32, y: i32) -> anyhow::Result<()> {
-    print_response(one_call(pipe_path, Request::MouseMove { x, y, opts: None }).await?)
+pub async fn mouse_move(pipe_path: &str, x: i32, y: i32, opts: Option<ActionOpts>) -> anyhow::Result<()> {
+    print_action_or_ack(one_call(pipe_path, Request::MouseMove { x, y, opts }).await?)
 }
 
 pub async fn drag(
@@ -142,6 +188,7 @@ pub async fn drag(
     ey: i32,
     button: &str,
     mods: Option<&str>,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
     let req = Request::Drag {
         start_x: sx,
@@ -150,9 +197,9 @@ pub async fn drag(
         end_y: ey,
         button: parse_button(button)?,
         modifiers: parse_mods(mods),
-        opts: None,
+        opts,
     };
-    print_response(one_call(pipe_path, req).await?)
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
 pub async fn scroll(
@@ -162,6 +209,7 @@ pub async fn scroll(
     dir: &str,
     amount: i32,
     mods: Option<&str>,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
     let req = Request::Scroll {
         x,
@@ -169,9 +217,9 @@ pub async fn scroll(
         direction: parse_dir(dir)?,
         amount,
         modifiers: parse_mods(mods),
-        opts: None,
+        opts,
     };
-    print_response(one_call(pipe_path, req).await?)
+    print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
 pub async fn wait(pipe_path: &str, ms: u32) -> anyhow::Result<()> {
@@ -203,8 +251,8 @@ pub async fn list_windows(
     print_response(one_call(pipe_path, req).await?)
 }
 
-pub async fn focus_window(pipe_path: &str, hwnd: u64) -> anyhow::Result<()> {
-    print_response(one_call(pipe_path, Request::FocusWindow { hwnd, opts: None }).await?)
+pub async fn focus_window(pipe_path: &str, hwnd: u64, opts: Option<ActionOpts>) -> anyhow::Result<()> {
+    print_action_or_ack(one_call(pipe_path, Request::FocusWindow { hwnd, opts }).await?)
 }
 
 pub async fn resize_move_window(
@@ -214,14 +262,15 @@ pub async fn resize_move_window(
     y: i32,
     w: i32,
     h: i32,
+    opts: Option<ActionOpts>,
 ) -> anyhow::Result<()> {
-    print_response(one_call(pipe_path, Request::ResizeMoveWindow { hwnd, x, y, w, h, opts: None }).await?)
+    print_action_or_ack(one_call(pipe_path, Request::ResizeMoveWindow { hwnd, x, y, w, h, opts }).await?)
 }
 
-pub async fn mouse_down(pipe_path: &str, button: &str) -> anyhow::Result<()> {
-    print_response(one_call(pipe_path, Request::MouseDown { button: parse_button(button)?, opts: None }).await?)
+pub async fn mouse_down(pipe_path: &str, button: &str, opts: Option<ActionOpts>) -> anyhow::Result<()> {
+    print_action_or_ack(one_call(pipe_path, Request::MouseDown { button: parse_button(button)?, opts }).await?)
 }
 
-pub async fn mouse_up(pipe_path: &str, button: &str) -> anyhow::Result<()> {
-    print_response(one_call(pipe_path, Request::MouseUp { button: parse_button(button)?, opts: None }).await?)
+pub async fn mouse_up(pipe_path: &str, button: &str, opts: Option<ActionOpts>) -> anyhow::Result<()> {
+    print_action_or_ack(one_call(pipe_path, Request::MouseUp { button: parse_button(button)?, opts }).await?)
 }
