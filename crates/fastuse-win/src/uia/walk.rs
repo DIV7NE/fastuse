@@ -98,8 +98,11 @@ pub fn walk_subtree(
 }
 
 /// Recurse over a *cache-populated* element, filling in `UIANode`. Never
-/// goes back to COM — all reads are `get_cached_*`.
-fn walk_cached(el: &UIElement, depth_remaining: u32) -> UIANode {
+/// goes back to COM — all reads are `get_cached_*`. Exposed `pub(crate)`
+/// so callers that already have a `BuildUpdatedCache`-populated root
+/// (e.g. `element_actions::resolve_element` after CR-02) can produce a
+/// `UIANode` snapshot without re-walking.
+pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> UIANode {
     let name = el.get_cached_name().unwrap_or_default();
     let automation_id = el.get_cached_automation_id().unwrap_or_default();
     let class_name = el.get_cached_classname().unwrap_or_default();

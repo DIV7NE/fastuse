@@ -8,7 +8,7 @@ use fastuse_proto::{Error as ProtoError, ErrorCode, Response, Selector};
 use crate::uia::automation::{foreground_hwnd, process_name_for_hwnd};
 use crate::uia::cache::get_or_fetch;
 use crate::uia::degraded::detect_degraded;
-use crate::uia::find::find_all;
+use crate::uia::find::collect_matching;
 use crate::uia::walk::walk_subtree;
 use crate::uia_pool::UiaPoolHandle;
 
@@ -35,14 +35,14 @@ pub fn handle_uia_query(
     };
     let raw: QueryRaw = pool.run(move |uia| {
         let root = get_or_fetch(uia, hwnd)?;
-        // For degraded detection we still need the rough tree shape; we
-        // walk once for the selector match and reuse the same walk for the
-        // degraded check.
+        // CR-02: single BuildUpdatedCache walk per call (PLAN Task 10
+        // contract: "Only one walk per call"; UIA-11 budget: <20ms p99
+        // on 1000-node tree). The walked `UIANode` tree feeds BOTH the
+        // degraded heuristic AND the selector match — no second walk.
         let tree = walk_subtree(uia, &root, fastuse_proto::TreeView::Content, None)?;
         let degraded = detect_degraded(&tree, process_name_for_hwnd(hwnd).as_deref());
-        // find_all walks again. For now we accept the second walk; future
-        // optimization can fold both into the same pass.
-        let matches = find_all(uia, &root, &selector)?;
+        let mut matches = Vec::new();
+        collect_matching(&tree, &selector, &mut matches);
         Ok(QueryRaw {
             matches,
             degraded,

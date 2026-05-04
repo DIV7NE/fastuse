@@ -31,7 +31,10 @@ pub fn find_first(
     Ok(first_matching(&tree, selector))
 }
 
-fn collect_matching(node: &UIANode, selector: &Selector, out: &mut Vec<UIANode>) {
+/// Walk an already-built `UIANode` tree and collect every node matching
+/// `selector`. Exposed `pub(crate)` so handlers that already have a walked
+/// tree (CR-02 fix in `query.rs`) can match without re-walking.
+pub(crate) fn collect_matching(node: &UIANode, selector: &Selector, out: &mut Vec<UIANode>) {
     if selector.matches(node) {
         out.push(node.clone());
     }
@@ -40,7 +43,10 @@ fn collect_matching(node: &UIANode, selector: &Selector, out: &mut Vec<UIANode>)
     }
 }
 
-fn first_matching(node: &UIANode, selector: &Selector) -> Option<UIANode> {
+/// Walk an already-built `UIANode` tree and return the first DFS-pre-order
+/// node matching `selector`. Exposed `pub(crate)` so handlers that already
+/// have a walked tree can match without re-walking (CR-02).
+pub(crate) fn first_matching(node: &UIANode, selector: &Selector) -> Option<UIANode> {
     if selector.matches(node) {
         return Some(node.clone());
     }
