@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, gsd/** ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rustup toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: cargo build --release --workspace
+        run: cargo build --release --workspace
+
+      - name: cargo xtask lints
+        run: cargo run -p xtask --release -- lints
+
+      - name: cargo test --release --workspace
+        run: cargo test --release --workspace
+
+      - name: Assert no duplicate windows/uiautomation crates
+        shell: pwsh
+        run: |
+          $tree = cargo tree -d 2>&1 | Out-String
+          Write-Host $tree
+          if ($tree -match "(?m)^windows v" -or $tree -match "(?m)^uiautomation v") {
+            Write-Error "Duplicate windows or uiautomation crate detected in dep graph"
+            exit 1
+          }
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastuse-binaries
+          path: |
+            target/release/fastuse-daemon.exe
+            target/release/fastuse-mcp.exe
+            target/release/fastuse-cli.exe

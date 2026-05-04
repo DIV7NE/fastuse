@@ -32,3 +32,6 @@ windows = { workspace = true, features = [
 
 [build-dependencies]
 embed-resource = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
