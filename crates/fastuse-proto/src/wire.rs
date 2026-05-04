@@ -357,6 +357,11 @@ pub enum Request {
     ListProcesses(ListProcesses),
     /// Terminate a process by PID or name (Phase 4).
     KillProcess(KillProcess),
+
+    // --- Warmup ---
+    /// Warm every cold path: D3D11 device, DXGI duplication, UIA root,
+    /// foreground HWND cache, monitor enum, COM apartments. No side effects.
+    Warmup,
 }
 
 /// Clipboard format selector.
@@ -740,6 +745,18 @@ pub enum Response {
     KillProcess {
         /// Number of process handles terminated.
         terminated: u32,
+    },
+
+    /// `Warmup` reply with per-subsystem timings.
+    Warmup {
+        /// Time spent warming the capture path (microseconds).
+        capture_us: u64,
+        /// Time spent warming UIA root + foreground (microseconds).
+        uia_us: u64,
+        /// Time spent warming monitor enumeration (microseconds).
+        monitors_us: u64,
+        /// Total wall-clock (microseconds).
+        total_us: u64,
     },
 }
 
@@ -1157,5 +1174,13 @@ mod tests {
         let mut cur = std::io::Cursor::new(bytes);
         let decoded: Request = decode_frame(&mut cur).unwrap();
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn warmup_round_trips() {
+        let r = Request::Warmup;
+        let bytes = encode_frame(&r).unwrap();
+        let mut cur = std::io::Cursor::new(bytes);
+        assert_eq!(r, decode_frame::<Request, _>(&mut cur).unwrap());
     }
 }

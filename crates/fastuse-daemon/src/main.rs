@@ -10,6 +10,7 @@
 //!   7. build tokio runtime
 //!   8. server::serve() (Task 7)
 
+mod action_opts;
 mod dispatch;
 mod idle;
 mod sd;
@@ -18,6 +19,7 @@ mod server;
 mod session;
 mod singleton;
 mod tracing_init;
+mod warmup;
 
 use fastuse_core::pipe_path_resolve;
 use fastuse_win::{increment_mta_once, set_per_monitor_v2_first_call};
@@ -173,6 +175,13 @@ fn main() {
             None
         }
     };
+
+    // Best-effort warmup: touch D3D11, DXGI, UIA root, monitor enum before the
+    // first client connect so the first real tool call is already hot.
+    let _ = warmup::run(
+        uia.as_ref().map(|a| &**a),
+        capture.as_ref().map(|a| &**a),
+    );
 
     // Build tokio runtime and run the pipe server (Task 7 wires server::serve).
     let rt = match tokio::runtime::Builder::new_multi_thread()

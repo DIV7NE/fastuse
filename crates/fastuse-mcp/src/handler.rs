@@ -367,6 +367,14 @@ pub struct KillProcessOutput {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
+pub struct WarmupOutput {
+    pub capture_us: u64,
+    pub uia_us: u64,
+    pub monitors_us: u64,
+    pub total_us: u64,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ProcessInfoOutput {
     pub pid: u32,
     pub name: String,
@@ -831,6 +839,18 @@ impl Fastuse {
         });
         match self.call(req).await? {
             Response::KillProcess { terminated } => Ok(Json(KillProcessOutput { terminated })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- Warmup ----
+    #[tool(name = "warmup", description = "Warm every cold path (D3D11, DXGI, UIA root, monitors). Idempotent. Daemon also auto-warms on spawn. Returns per-subsystem timings in microseconds.")]
+    async fn warmup(&self) -> Result<Json<WarmupOutput>, McpError> {
+        match self.call(Request::Warmup).await? {
+            Response::Warmup { capture_us, uia_us, monitors_us, total_us } => {
+                Ok(Json(WarmupOutput { capture_us, uia_us, monitors_us, total_us }))
+            }
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }

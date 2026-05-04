@@ -106,6 +106,15 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 current_idle_timeout_secs: ctx.idle_timeout_secs as u32,
             }
         }
+        Request::Warmup => {
+            let w_start = Instant::now();
+            let resp = crate::warmup::run(
+                ctx.uia.as_ref().map(|a| &**a),
+                ctx.capture.as_ref().map(|a| &**a),
+            );
+            win32_us = w_start.elapsed().as_micros() as i64;
+            resp
+        }
 
         // -------- Phase 2: input --------
         Request::Click {
@@ -115,10 +124,13 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             count,
             modifiers,
             skip_set_cursor_pos,
-            opts: _,
-        } => run_unit(ctx, &mut win32_us, move || {
-            ih::click(x, y, button, count, &modifiers, skip_set_cursor_pos)
-        }),
+            opts,
+        } => {
+            let inner = run_unit(ctx, &mut win32_us, move || {
+                ih::click(x, y, button, count, &modifiers, skip_set_cursor_pos)
+            });
+            finalize(inner, opts, ctx)
+        }
         Request::MouseMove { x, y, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_move(x, y)),
         Request::MouseDown { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_down(button)),
         Request::MouseUp { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_up(button)),
@@ -524,6 +536,21 @@ pub fn err_response(code: ErrorCode, msg: impl Into<String>) -> Response {
 // Suppress unused-import warning for proto re-exports.
 #[allow(dead_code)]
 fn _types_used(_: MouseButton, _: ScrollDirection) {}
+
+/// Apply `ActionOpts` post-action perception. Returns the inner response
+/// unchanged when `opts` is `None`; otherwise delegates to `action_opts::apply`.
+fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &DispatchCtx) -> Response {
+    let Some(opts) = opts else { return inner };
+    let inner_ok = matches!(inner, Response::Ack { .. } | Response::Element { matched: true });
+    crate::action_opts::apply(
+        opts,
+        inner_ok,
+        crate::action_opts::OptsCtx {
+            uia: ctx.uia.as_ref(),
+            capture: ctx.capture.as_ref(),
+        },
+    )
+}
 
 #[cfg(test)]
 mod tests {

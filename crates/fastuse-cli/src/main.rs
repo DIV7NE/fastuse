@@ -312,6 +312,10 @@ enum Cmd {
         #[arg(long)]
         process_tree: bool,
     },
+
+    // ----- Warmup -----
+    /// Warm every cold path (D3D11, DXGI, UIA root, monitors). Idempotent.
+    Warmup,
 }
 
 fn parse_hwnd(s: &str) -> anyhow::Result<u64> {
@@ -450,6 +454,35 @@ fn main() {
                     if force { Some(true) } else { None },
                     if process_tree { Some(true) } else { None },
                 ).await
+            }
+
+            // ---- Warmup ----
+            Cmd::Warmup => {
+                use fastuse_proto::{Request, Response};
+                use crate::proto_io::{read_response, write_request};
+                use crate::spawn::connect_or_spawn;
+                let mut pipe = connect_or_spawn(&identity.path).await?;
+                write_request(&mut pipe, &Request::Hello {
+                    client_kind: "cli".into(),
+                    client_version: env!("CARGO_PKG_VERSION").into(),
+                    requested_idle_timeout_secs: None,
+                }).await?;
+                let _ = read_response(&mut pipe).await?;
+                write_request(&mut pipe, &Request::Warmup).await?;
+                match read_response(&mut pipe).await? {
+                    Response::Warmup { capture_us, uia_us, monitors_us, total_us } => {
+                        println!("{}", serde_json::json!({
+                            "ok": true,
+                            "capture_us": capture_us,
+                            "uia_us": uia_us,
+                            "monitors_us": monitors_us,
+                            "total_us": total_us,
+                        }));
+                        Ok(())
+                    }
+                    Response::Error(e) => anyhow::bail!("warmup: {}", e.message),
+                    other => anyhow::bail!("unexpected response: {other:?}"),
+                }
             }
         }
     });
