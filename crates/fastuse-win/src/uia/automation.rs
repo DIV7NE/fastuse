@@ -56,7 +56,11 @@ pub fn process_name_for_hwnd(hwnd: u64) -> Option<String> {
     let _ = unsafe { CloseHandle(proc_h) };
     res.ok()?;
 
-    let path = String::from_utf16_lossy(&buf[..size as usize]);
+    // WR-05: defensive clamp. On API success `size` is the count of UTF-16
+    // code units written (excluding the NUL terminator), but a malformed
+    // driver returning size > buf.len() would panic in the slice. Clamp.
+    let size = (size as usize).min(buf.len());
+    let path = String::from_utf16_lossy(&buf[..size]);
     let basename = path
         .rsplit_once('\\')
         .map(|(_, b)| b.to_string())

@@ -335,7 +335,7 @@ fn capture_one(
     region: Option<Rect>,
 ) -> Result<FrameBuf, ProtoError> {
     // Find the per-monitor entry. If it was previously dropped (access-lost
-    // not yet rebuilt), reacquire now.
+    // not yet rebuilt or display-change invalidate), reacquire now.
     if !state
         .monitors
         .iter()
@@ -532,6 +532,25 @@ pub fn force_lose_for_test(monitor: u32) {
     STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
             state.monitors.retain(|m| m.output_idx != monitor);
+        }
+    });
+}
+
+/// WR-01: Drop the entire cached `CaptureState` so the next capture
+/// rebuilds the device, factory, duplication objects, and staging textures
+/// from scratch. Wire this from a `WM_DISPLAYCHANGE` handler on the input
+/// thread (or any out-of-band display-change observer) so a resolution
+/// change does not cause `CopyResource` truncation against a stale staging
+/// texture sized to the previous resolution.
+///
+/// Must be called on the capture thread (the only thread that owns
+/// `STATE`). For cross-thread invalidation, post the call through the
+/// capture-thread dispatcher.
+pub fn invalidate_state_on_display_change() {
+    STATE.with(|cell| {
+        if cell.borrow().is_some() {
+            tracing::warn!("DXGI capture state invalidated on display change");
+            *cell.borrow_mut() = None;
         }
     });
 }

@@ -94,7 +94,7 @@ pub fn walk_subtree(
         .build_updated_cache(&req)
         .map_err(|e| internal(format!("build_updated_cache: {e}")))?;
     let max_depth = depth.unwrap_or(u32::MAX);
-    Ok(walk_cached(&cached_root, max_depth))
+    walk_cached(&cached_root, max_depth)
 }
 
 /// Recurse over a *cache-populated* element, filling in `UIANode`. Never
@@ -102,34 +102,41 @@ pub fn walk_subtree(
 /// so callers that already have a `BuildUpdatedCache`-populated root
 /// (e.g. `element_actions::resolve_element` after CR-02) can produce a
 /// `UIANode` snapshot without re-walking.
-pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> UIANode {
+pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> Result<UIANode, ProtoError> {
+    // WR-07: name/class/help_text/automation_id/localized are legitimately
+    // empty for many controls — keep lossy. But bounding_rectangle and
+    // control_type are essential identity properties: a real cache-fetch
+    // failure here means the element went stale between BuildUpdatedCache
+    // and read, and silently falling back to (0,0,0,0) makes click_element
+    // click the desktop origin. Promote those two to ElementNotFound so
+    // callers can distinguish "stale cache" from "anonymous control."
     let name = el.get_cached_name().unwrap_or_default();
     let automation_id = el.get_cached_automation_id().unwrap_or_default();
     let class_name = el.get_cached_classname().unwrap_or_default();
-    let control_type = el
-        .get_cached_control_type()
-        .ok()
-        .map(map_control_type)
-        .unwrap_or(ProtoControlType::Custom);
+    let control_type = el.get_cached_control_type().map(map_control_type).map_err(|e| {
+        ProtoError::new(
+            ErrorCode::ElementNotFound,
+            format!("get_cached_control_type (stale cache?): {e}"),
+        )
+    })?;
     let localized_control_type = el.get_cached_localized_control_type().unwrap_or_default();
     let help_text = el.get_cached_help_text().unwrap_or_default();
     let is_enabled = el.is_cached_enabled().unwrap_or(false);
     let is_keyboard_focusable = el.is_cached_keyboard_focusable().unwrap_or(false);
     let bounding_rect = el
         .get_cached_bounding_rectangle()
-        .ok()
         .map(|r| ProtoRect {
             x: r.get_left(),
             y: r.get_top(),
             w: r.get_right() - r.get_left(),
             h: r.get_bottom() - r.get_top(),
         })
-        .unwrap_or(ProtoRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        });
+        .map_err(|e| {
+            ProtoError::new(
+                ErrorCode::ElementNotFound,
+                format!("get_cached_bounding_rectangle (stale cache?): {e}"),
+            )
+        })?;
 
     // Value pattern (cached). Wrap in Redact so password-like fields never
     // leak through Debug/tracing (T-03-02).
@@ -144,12 +151,12 @@ pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> UIANode {
         if let Ok(kids) = el.get_cached_children() {
             children.reserve(kids.len());
             for child in &kids {
-                children.push(walk_cached(child, depth_remaining - 1));
+                children.push(walk_cached(child, depth_remaining - 1)?);
             }
         }
     }
 
-    UIANode {
+    Ok(UIANode {
         name,
         automation_id,
         class_name,
@@ -161,7 +168,7 @@ pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> UIANode {
         help_text,
         value,
         children,
-    }
+    })
 }
 
 /// Map the uiautomation crate's `ControlType` enum to our protocol's closed

@@ -44,39 +44,39 @@ unsafe impl Send for CacheEntry {}
 static CACHE: Lazy<Mutex<HashMap<u64, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Resolve the UIA root for a given HWND, using the TTL cache.
+///
+/// WR-02: The lock is held across the COM fetch so two pool workers
+/// racing on the same HWND do not both pay the ~5–50ms `element_from_handle`
+/// round-trip. Serializing UIA root resolution is acceptable: each fetch
+/// is bounded and the cache's whole purpose is to coalesce concurrent
+/// callers onto one cached root.
 pub fn get_or_fetch(uia: &UIAutomation, hwnd: u64) -> Result<UIElement, ProtoError> {
-    if let Some(entry) = lookup_fresh(hwnd) {
-        return Ok(entry);
+    let mut guard = CACHE
+        .lock()
+        .map_err(|e| ProtoError::new(fastuse_proto::ErrorCode::Internal, format!("cache poisoned: {e}")))?;
+
+    // Fresh hit: return the cached root.
+    if let Some(entry) = guard.get(&hwnd) {
+        if entry.fetched_at.elapsed() < TTL {
+            return Ok(entry.root.clone());
+        }
+        // Stale; evict before fetching.
+        guard.remove(&hwnd);
     }
+
+    // Miss / stale: fetch under the lock so concurrent racers wait for us.
     let h = HWND(hwnd as *mut core::ffi::c_void);
     let element = uia
         .element_from_handle(Handle::from(h))
         .map_err(|e| ProtoError::new(fastuse_proto::ErrorCode::WindowNotFound, format!("element_from_handle({hwnd}): {e}")))?;
-    insert(hwnd, element.clone());
+    guard.insert(
+        hwnd,
+        CacheEntry {
+            root: element.clone(),
+            fetched_at: Instant::now(),
+        },
+    );
     Ok(element)
-}
-
-fn lookup_fresh(hwnd: u64) -> Option<UIElement> {
-    let mut guard = CACHE.lock().ok()?;
-    let entry = guard.get(&hwnd)?;
-    if entry.fetched_at.elapsed() < TTL {
-        Some(entry.root.clone())
-    } else {
-        guard.remove(&hwnd);
-        None
-    }
-}
-
-fn insert(hwnd: u64, root: UIElement) {
-    if let Ok(mut guard) = CACHE.lock() {
-        guard.insert(
-            hwnd,
-            CacheEntry {
-                root,
-                fetched_at: Instant::now(),
-            },
-        );
-    }
 }
 
 /// Invalidate one HWND's cache entry. Called by the win-event hook

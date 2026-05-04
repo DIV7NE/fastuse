@@ -50,7 +50,7 @@ fn resolve_element(
         // snapshot (`walk_cached`) AND to relocate the live element via
         // `get_cached_children()` — no second walk.
         let cached_root = build_cached_root(uia, &root)?;
-        let tree = walk_cached(&cached_root, u32::MAX);
+        let tree = walk_cached(&cached_root, u32::MAX)?;
         let target_node = match find_first_in_tree(&tree, &selector) {
             Some(n) => n,
             None => {
@@ -199,7 +199,7 @@ pub fn handle_scroll_into_view(
         let root = get_or_fetch(uia, hwnd)?;
         // CR-02: single BuildUpdatedCache walk per call.
         let cached_root = build_cached_root(uia, &root)?;
-        let tree = walk_cached(&cached_root, u32::MAX);
+        let tree = walk_cached(&cached_root, u32::MAX)?;
         let Some(target) = find_first_in_tree(&tree, &selector) else {
             return Err(ProtoError::new(
                 ErrorCode::ElementNotFound,
