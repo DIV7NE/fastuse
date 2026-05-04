@@ -13,3 +13,5 @@ path = "src/main.rs"
 syn = { workspace = true }
 walkdir = { workspace = true }
 anyhow = { workspace = true }
+quote = "1"
+proc-macro2 = "1"
