@@ -15,8 +15,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     PostMessageW, PostThreadMessageW, RegisterClassExW, TranslateMessage, UnregisterClassW,
-    CW_USEDEFAULT, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_QUIT, WM_USER,
-    WNDCLASSEXW,
+    CW_USEDEFAULT, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DISPLAYCHANGE,
+    WM_QUIT, WM_USER, WNDCLASSEXW,
 };
 
 /// Job sent to the input thread.
@@ -78,6 +78,14 @@ impl Drop for InputThreadHandle {
 }
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_DISPLAYCHANGE {
+        // The OS broadcasts WM_DISPLAYCHANGE to top-level windows when the
+        // monitor configuration changes. Our hidden message-only HWND
+        // receives it because we have one. Invalidate the monitor cache so
+        // the next list_monitors call re-enumerates with current bounds /
+        // DPI. (Plan Task 8.)
+        crate::window::monitors::invalidate_cache();
+    }
     // SAFETY: DefWindowProcW is the Win32 fallback handler; always safe to call.
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }

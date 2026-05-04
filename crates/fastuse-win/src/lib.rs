@@ -11,9 +11,11 @@
 
 pub mod com;
 pub mod dpi;
+pub mod input;
 pub mod input_thread;
 pub mod uia_pool;
 pub mod capture_thread;
+pub mod window;
 
 pub use com::increment_mta_once;
 pub use dpi::set_per_monitor_v2_first_call;

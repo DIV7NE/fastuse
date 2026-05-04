@@ -12,6 +12,12 @@ once_cell = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+default = []
+# Test-only: swap real SendInput for an in-process recorder. Production
+# builds NEVER enable this. See input/sendinput.rs MockSink.
+mock-sendinput = []
+
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
@@ -19,8 +25,10 @@ windows = { workspace = true, features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = { workspace = true }
