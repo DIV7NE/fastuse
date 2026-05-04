@@ -9,6 +9,13 @@
 #![deny(missing_docs)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
+// WR-06: this crate casts `u64` HWND wire values to `*mut _` for
+// SetForegroundWindow / SetWindowPos. On a 32-bit Windows target the cast
+// truncates the high 32 bits silently. The project is x64-only by stated
+// constraint; enforce that at build time.
+#[cfg(all(windows, not(target_pointer_width = "64")))]
+compile_error!("fastuse-win requires a 64-bit Windows target");
+
 pub mod com;
 pub mod dpi;
 pub mod input;

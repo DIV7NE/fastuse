@@ -103,10 +103,20 @@ impl InputThreadHandle {
                 ))
             })
         }));
-        match self.send_payload(job).map_err(|_| fastuse_proto::Error::new(
-            fastuse_proto::ErrorCode::DaemonDead,
-            "input thread shut down".to_string(),
-        ))? {
+        match self.send_payload(job).map_err(|e| {
+            // WR-10: surface input-thread death loudly. The daemon has no
+            // supervisor in v1; every subsequent dispatch will fail with
+            // DaemonDead until the user restarts. A Phase-3 follow-up will
+            // add a respawn loop.
+            tracing::error!(
+                error = ?e,
+                "input thread died — daemon must be restarted (Phase-3 will add respawn)"
+            );
+            fastuse_proto::Error::new(
+                fastuse_proto::ErrorCode::DaemonDead,
+                "input thread shut down".to_string(),
+            )
+        })? {
             InputReplyPayload::Run(r) => {
                 let v = r?;
                 serde_json::from_value(v).map_err(|e| fastuse_proto::Error::new(

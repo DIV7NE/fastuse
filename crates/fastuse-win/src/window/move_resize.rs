@@ -16,10 +16,14 @@ pub fn resize_move_window(hwnd_raw: u64, x: i32, y: i32, w: i32, h: i32) -> Resu
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return Err(window_not_found(hwnd_raw));
     }
-    if w <= 0 || h <= 0 {
+    // IN-02: cap absurd sizes; SetWindowPos with i32::MAX returns an opaque
+    // ERROR_INVALID_PARAMETER. 65535 px on a side covers every realistic
+    // virtual-desktop layout (8K monitor stack ≈ 30k px wide today).
+    const MAX_DIM: i32 = 65535;
+    if w <= 0 || h <= 0 || w > MAX_DIM || h > MAX_DIM {
         return Err(ProtoError::new(
             ErrorCode::Internal,
-            format!("invalid size: {w}×{h}"),
+            format!("invalid size: {w}×{h} (must be 1..={MAX_DIM} on each axis)"),
         ));
     }
     // Validate the window's centre lies on at least one monitor.

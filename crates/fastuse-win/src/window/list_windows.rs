@@ -135,8 +135,15 @@ pub fn safe_get_window_text(hwnd: HWND, timeout_ms: u32) -> Option<String> {
     if r.0 == 0 {
         return None;
     }
-    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..len]))
+    // WR-07: trust the WM_GETTEXT return value (chars copied, including NUL)
+    // over scanning for a NUL terminator. A non-conformant WndProc that
+    // writes a non-NUL-terminated buffer would otherwise leak adjacent
+    // uninitialised memory into the title. Cap to buf.len()-1 to leave
+    // room for the implicit NUL slot. Use the NUL scan as a secondary cap
+    // so we don't include a trailing NUL even when `out` over-reports.
+    let cap = (out as usize).min(buf.len().saturating_sub(1));
+    let nul = buf.iter().take(cap).position(|&c| c == 0).unwrap_or(cap);
+    Some(String::from_utf16_lossy(&buf[..nul]))
 }
 
 #[cfg(test)]

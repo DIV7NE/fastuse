@@ -86,8 +86,22 @@ pub enum ChordError {
 pub const MAX_CHORD_LEN: usize = 256;
 
 /// Parse a chord string like `"ctrl+shift+a"` into a [`Chord`].
+///
+/// Matching contract (WR-05):
+/// - Modifier and named-key tokens (`ctrl`, `enter`, `f4`, …) are matched
+///   ASCII-case-insensitively after Unicode-lowercase folding. Non-ASCII
+///   modifier names (e.g. fullwidth `Ｃｔｒｌ`) intentionally do NOT match.
+/// - The single-character Unicode fallback preserves the **original** token
+///   so emission via `KEYEVENTF_UNICODE` reflects the user-typed case
+///   (`"A"` → VK_A via ASCII fallback; `"Ä"` → `Unicode('Ä')` preserving the
+///   diaeresis). This asymmetry is intentional: ASCII letters resolve to
+///   virtual-key codes which are case-insensitive at the OS layer, while
+///   non-ASCII characters round-trip through Unicode injection where case
+///   matters.
 pub fn parse_chord(s: &str) -> Result<Chord, ChordError> {
-    if s.len() > MAX_CHORD_LEN {
+    // WR-04: enforce the documented 256-CHARACTER cap, not a 256-byte cap;
+    // a chord like "🎉🎉…" of valid 4-byte scalars was previously rejected.
+    if s.chars().count() > MAX_CHORD_LEN {
         return Err(ChordError::TooLong);
     }
     if s.is_empty() {

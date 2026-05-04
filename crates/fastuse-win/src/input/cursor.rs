@@ -9,10 +9,12 @@ use fastuse_proto::{Error as ProtoError, ErrorCode};
 pub fn set_cursor_pos(x: i32, y: i32) -> Result<(), ProtoError> {
     // SAFETY: SetCursorPos is always safe; failure returns FALSE.
     let r = unsafe { SetCursorPos(x, y) };
-    if r.is_err() {
+    if let Err(e) = r {
+        // IN-03: format the underlying windows::core::Error directly rather
+        // than the Result wrapper.
         return Err(ProtoError::new(
             ErrorCode::Internal,
-            format!("SetCursorPos({x},{y}) failed: {:?}", r),
+            format!("SetCursorPos({x},{y}) failed: {e}"),
         ));
     }
     Ok(())

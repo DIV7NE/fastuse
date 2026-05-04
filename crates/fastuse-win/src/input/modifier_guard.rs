@@ -75,31 +75,46 @@ pub fn press_chord(mods: &[ModKey]) -> ModifierGuard {
 ///
 /// Emits a single batched `SendInput` with all KEYUPs (CONTEXT.md hard rule).
 /// Modifiers are released in reverse-press order (WR-01).
+///
+/// WR-11 / IN-01: if `SendInput` fails (e.g. an LL hook is blocking), the
+/// registry is left intact and a tracing::error! is emitted so a subsequent
+/// call (or the next handler invocation) can retry. Previously the registry
+/// was cleared pre-send so `held_count() == 0` lied about OS state.
 pub fn release_all_held() {
+    let primary = PRIMARY_KEY_UP.with(|p| p.borrow_mut().take());
     let mut events: Vec<INPUT> = Vec::new();
-    // Primary key first (so the OS sees key-up before the modifier-up that
-    // might re-trigger a chord).
-    PRIMARY_KEY_UP.with(|p| {
-        if let Some(ev) = p.borrow_mut().take() {
-            events.push(ev);
+    // INPUT is Copy via the windows-rs binding (it's a plain POD union);
+    // copying for the rollback path keeps the source-of-truth in `primary`.
+    if let Some(ref ev) = primary {
+        events.push(*ev);
+    }
+    let snapshot: Vec<u8> = HELD.with(|h| h.borrow().iter().rev().copied().collect());
+    for &tag in &snapshot {
+        events.push(key_vk(tag_to_vk(tag), true));
+    }
+    if events.is_empty() {
+        return;
+    }
+    match send(&events) {
+        Ok(_) => {
+            HELD.with(|h| h.borrow_mut().clear());
         }
-    });
-    HELD.with(|h| {
-        let mut held = h.borrow_mut();
-        if held.is_empty() && events.is_empty() {
-            return;
+        Err(e) => {
+            // Re-register the primary key so a follow-up call retries it,
+            // and leave HELD intact so held_count reflects the OS state we
+            // last knew about.
+            if let Some(ev) = primary {
+                PRIMARY_KEY_UP.with(|p| *p.borrow_mut() = Some(ev));
+            }
+            tracing::error!(
+                err = ?e,
+                "modifier flush partial — OS may still see modifier(s) pressed; will retry on next call"
+            );
         }
-        // WR-01: iterate in reverse-press order so the last-pressed modifier
-        // releases first.
-        for &tag in held.iter().rev() {
-            events.push(key_vk(tag_to_vk(tag), true));
-        }
-        held.clear();
-    });
-    if !events.is_empty() {
-        let _ = send(&events);
     }
 }
+
+
 
 /// CR-03: register the in-flight primary-key UP event so a panic during
 /// `hold_key`'s sleep flushes it via `release_all_held`. Replaces any prior
@@ -145,20 +160,42 @@ impl ModifierGuard {
         if self.owned.is_empty() {
             return;
         }
+        // WR-11 / IN-01: build the SendInput batch from a snapshot, only
+        // mutate HELD on success. On failure, log and leave HELD intact so
+        // the next handler can retry.
         let mut events: Vec<INPUT> = Vec::with_capacity(self.owned.len());
+        let mut tags_to_clear: Vec<u8> = Vec::with_capacity(self.owned.len());
         HELD.with(|h| {
-            let mut held = h.borrow_mut();
+            let held = h.borrow();
             // Reverse order to match press_chord's semantics (last-pressed
             // released first — matches user intent).
             for &tag in self.owned.iter().rev() {
-                if let Some(pos) = held.iter().position(|&t| t == tag) {
-                    held.remove(pos);
+                if held.iter().any(|&t| t == tag) {
                     events.push(key_vk(tag_to_vk(tag), true));
+                    tags_to_clear.push(tag);
                 }
             }
         });
-        if !events.is_empty() {
-            let _ = send(&events);
+        if events.is_empty() {
+            return;
+        }
+        match send(&events) {
+            Ok(_) => {
+                HELD.with(|h| {
+                    let mut held = h.borrow_mut();
+                    for tag in &tags_to_clear {
+                        if let Some(pos) = held.iter().position(|t| t == tag) {
+                            held.remove(pos);
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(
+                    err = ?e,
+                    "modifier guard release partial — OS may still see modifier(s) pressed"
+                );
+            }
         }
     }
 }

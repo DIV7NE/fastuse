@@ -108,7 +108,14 @@ async fn notepad_e2e_unicode_save_close() {
     let _ = send!(Request::Key { chord: "alt+f4".into(), repeat: 1 }, true);
 
     // Latency: assert p50 < 50ms across non-Wait calls.
+    // WR-02 belt-and-braces: explicit message instead of an opaque
+    // index-out-of-bounds when no calls were tracked (e.g. macro tracking
+    // flag flipped during a refactor or every prior call panicked).
     rtts_us.sort_unstable();
+    assert!(
+        !rtts_us.is_empty(),
+        "no non-Wait calls were tracked — SC-1 cannot be evaluated"
+    );
     let p50 = rtts_us[rtts_us.len() / 2];
     eprintln!(
         "notepad_e2e: {} non-capture/non-wait calls, p50 = {} us, max = {} us, all = {:?}",
