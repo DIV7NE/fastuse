@@ -1,6 +1,7 @@
 //! fastuse-cli — local helper CLI for the daemon.
 
 mod cmd_phase2;
+mod cmd_phase3;
 mod cmd_ping;
 mod cmd_start;
 mod cmd_status;
@@ -171,6 +172,97 @@ enum Cmd {
         /// New height in physical pixels.
         h: i32,
     },
+
+    // ----- Phase 3: capture -----
+    /// Take a full-monitor screenshot.
+    Screenshot {
+        /// Monitor index (0 = primary).
+        #[arg(long)]
+        monitor: Option<u32>,
+        /// jpeg (default) or png.
+        #[arg(long)]
+        format: Option<String>,
+        /// Write encoded bytes to this file (raw, NOT base64).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Take a sub-rectangle screenshot (reuses cached duplication object).
+    ScreenshotRegion {
+        /// Top-left x in physical pixels.
+        x: i32,
+        /// Top-left y in physical pixels.
+        y: i32,
+        /// Width in physical pixels.
+        w: u32,
+        /// Height in physical pixels.
+        h: u32,
+        /// Monitor index (0 = primary).
+        #[arg(long)]
+        monitor: Option<u32>,
+        /// jpeg (default) or png.
+        #[arg(long)]
+        format: Option<String>,
+        /// Write encoded bytes to this file.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+
+    // ----- Phase 3: UIA -----
+    /// Walk the UIA subtree for a window (foreground if --hwnd is unset).
+    UiaTree {
+        /// HWND as decimal or 0x-hex.
+        #[arg(long)]
+        hwnd: Option<String>,
+        /// Depth bound (None = unlimited).
+        #[arg(long)]
+        depth: Option<u32>,
+        /// content (default) or raw.
+        #[arg(long)]
+        view: Option<String>,
+    },
+    /// Selector-driven query. Selector is JSON: {"ByName":"OK"}.
+    UiaQuery {
+        /// Selector JSON. See fastuse_proto::Selector.
+        selector: String,
+        /// Optional explicit root HWND (default foreground).
+        #[arg(long)]
+        root_hwnd: Option<String>,
+    },
+    /// Inspect the UIA element under a screen point.
+    InspectAt {
+        /// Probe x in physical pixels.
+        x: i32,
+        /// Probe y in physical pixels.
+        y: i32,
+    },
+    /// Find an element via selector and click its centroid.
+    ClickElement {
+        /// Selector JSON.
+        selector: String,
+        /// Modifier list, e.g. ctrl,shift.
+        #[arg(long)]
+        mods: Option<String>,
+    },
+    /// Find an element via selector, focus it, type text.
+    TypeIntoElement {
+        /// Selector JSON.
+        selector: String,
+        /// Text to type (Redact<>-wrapped end-to-end).
+        text: String,
+    },
+    /// Poll for an element until it appears or timeout.
+    WaitForElement {
+        /// Selector JSON.
+        selector: String,
+        /// Timeout in milliseconds (0 = default 5000).
+        #[arg(long, default_value_t = 0)]
+        timeout_ms: u32,
+    },
+    /// Scroll the matched element into view.
+    ScrollIntoView {
+        /// Selector JSON.
+        selector: String,
+    },
 }
 
 fn parse_hwnd(s: &str) -> anyhow::Result<u64> {
@@ -230,6 +322,65 @@ fn main() {
             Cmd::ResizeMoveWindow { hwnd, x, y, w, h } => {
                 let hw = parse_hwnd(&hwnd)?;
                 cmd_phase2::resize_move_window(&identity.path, hw, x, y, w, h).await
+            }
+
+            // ---- Phase 3 ----
+            Cmd::Screenshot { monitor, format, out } => {
+                cmd_phase3::screenshot(
+                    &identity.path,
+                    monitor,
+                    format.as_deref(),
+                    out.as_deref(),
+                )
+                .await
+            }
+            Cmd::ScreenshotRegion {
+                x,
+                y,
+                w,
+                h,
+                monitor,
+                format,
+                out,
+            } => {
+                cmd_phase3::screenshot_region(
+                    &identity.path,
+                    x,
+                    y,
+                    w,
+                    h,
+                    monitor,
+                    format.as_deref(),
+                    out.as_deref(),
+                )
+                .await
+            }
+            Cmd::UiaTree { hwnd, depth, view } => {
+                let hwnd = match hwnd {
+                    Some(s) => Some(parse_hwnd(&s)?),
+                    None => None,
+                };
+                cmd_phase3::uia_tree(&identity.path, hwnd, depth, view.as_deref()).await
+            }
+            Cmd::UiaQuery { selector, root_hwnd } => {
+                let root = match root_hwnd {
+                    Some(s) => Some(parse_hwnd(&s)?),
+                    None => None,
+                };
+                cmd_phase3::uia_query(&identity.path, &selector, root).await
+            }
+            Cmd::InspectAt { x, y } => cmd_phase3::inspect_at_point(&identity.path, x, y).await,
+            Cmd::ClickElement { selector, mods } => {
+                cmd_phase3::click_element(&identity.path, &selector, mods.as_deref()).await
+            }
+            Cmd::TypeIntoElement { selector, text } => {
+                cmd_phase3::type_into_element(&identity.path, &selector, text).await
+            }
+            Cmd::WaitForElement { selector, timeout_ms } => {
+                cmd_phase3::wait_for_element(&identity.path, &selector, timeout_ms).await
+            }
+            Cmd::ScrollIntoView { selector } => {
+                cmd_phase3::scroll_into_view(&identity.path, &selector).await
             }
         }
     });

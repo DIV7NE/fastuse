@@ -21,8 +21,8 @@ use crate::session::Session;
 pub async fn serve(
     pipe_path: String,
     input: Option<Arc<InputThreadHandle>>,
-    _uia: Option<&UiaPoolHandle>,
-    _capture: Option<&CaptureThreadHandle>,
+    uia: Option<Arc<UiaPoolHandle>>,
+    capture: Option<Arc<CaptureThreadHandle>>,
     idle_timeout_secs: u64,
     session_id: u32,
     allow: Vec<String>,
@@ -86,6 +86,8 @@ pub async fn serve(
         let ctx = DispatchCtx {
             session_id,
             input: input_arc.clone(),
+            uia: uia.clone(),
+            capture: capture.clone(),
             shutdown_flag: Arc::clone(&shutdown),
             idle_timeout_secs,
             session: Session::new(allow.clone()),

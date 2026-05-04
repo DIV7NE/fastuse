@@ -9,6 +9,8 @@ use std::io::{self, Read, Write};
 use crate::coords::{MonitorInfo, MouseButton, ScrollDirection, WindowInfo};
 use crate::error::Error;
 use crate::redact::Redact;
+use crate::selector::Selector;
+use crate::uia_node::{ImageFormat, TreeView, UIANode};
 
 /// Hard cap on a single frame payload. Per threat T-01-02, an oversized
 /// length-prefix declared by an attacker MUST NOT cause unbounded allocation.
@@ -162,6 +164,85 @@ pub enum Request {
         w: i32,
         /// New height in physical pixels.
         h: i32,
+    },
+
+    // --- Phase 3: capture (CAP-01..06) ---
+    /// Full-monitor screenshot. `None` monitor = primary; `None` format = JPEG.
+    Screenshot {
+        /// Monitor index (0 = primary, then per `ListMonitors` order).
+        monitor: Option<u32>,
+        /// Output image format (default JPEG q=85).
+        format: Option<ImageFormat>,
+    },
+    /// Sub-rectangle screenshot — reuses the cached duplication object
+    /// (CAP-02: NEVER reacquires for region capture).
+    ScreenshotRegion {
+        /// Top-left x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Top-left y in physical pixels (virtual-desktop origin).
+        y: i32,
+        /// Width in physical pixels.
+        w: u32,
+        /// Height in physical pixels.
+        h: u32,
+        /// Monitor index (default primary).
+        monitor: Option<u32>,
+        /// Output image format (default JPEG q=85).
+        format: Option<ImageFormat>,
+    },
+
+    // --- Phase 3: UIA (UIA-02..08) ---
+    /// Walk a UIA subtree from `hwnd`'s root (None = foreground).
+    UiaTree {
+        /// HWND cast to `u64` (None = foreground).
+        hwnd: Option<u64>,
+        /// Walk depth bound (None = unlimited within timeout).
+        depth: Option<u32>,
+        /// Tree walker view (default Content).
+        view: Option<TreeView>,
+    },
+    /// Selector-driven query against a UIA root (None = foreground).
+    UiaQuery {
+        /// Selector expression.
+        selector: Selector,
+        /// Optional explicit root HWND (default foreground).
+        root_hwnd: Option<u64>,
+    },
+    /// Single-element inspection at a screen point.
+    InspectAtPoint {
+        /// Probe x in physical pixels (virtual-desktop origin).
+        x: i32,
+        /// Probe y in physical pixels (virtual-desktop origin).
+        y: i32,
+    },
+    /// Find an element via selector and click its centroid (delegates to
+    /// Phase 2 `input::click` after centroid resolution).
+    ClickElement {
+        /// Selector expression.
+        selector: Selector,
+        /// Modifier chord tokens to hold during the click.
+        modifiers: Option<Vec<String>>,
+    },
+    /// Find an element via selector, focus it, and type into it
+    /// (delegates to Phase 2 `input::type_text` after `SetFocus`).
+    TypeIntoElement {
+        /// Selector expression.
+        selector: Selector,
+        /// Unicode payload to type, redacted from logs (T-03-01).
+        text: Redact<String>,
+    },
+    /// Poll for an element until it appears or timeout.
+    WaitForElement {
+        /// Selector expression.
+        selector: Selector,
+        /// Timeout in milliseconds (default 5000 server-side).
+        timeout_ms: u32,
+    },
+    /// Scroll the matched element into view via `IUIAutomationScrollItemPattern`
+    /// (or fallback `IUIAutomationScrollPattern` on the parent).
+    ScrollIntoView {
+        /// Selector expression.
+        selector: Selector,
     },
 
     // --- Phase 4: system surface ---
@@ -489,6 +570,50 @@ pub enum Response {
     /// Result of `ListWindows`.
     Windows(Vec<WindowInfo>),
 
+    // --- Phase 3: capture ---
+    /// Encoded image payload. Wrapped in `Redact<Vec<u8>>` per T-03-03 so
+    /// raw pixel bytes never appear in tracing/Debug; the MCP edge unwraps
+    /// and base64-encodes for the JSON content block.
+    Screenshot {
+        /// Encoded bytes (JPEG or PNG). MCP edge re-encodes to base64.
+        bytes: Redact<Vec<u8>>,
+        /// MIME type (`image/jpeg` or `image/png`).
+        mime: String,
+        /// Width in physical pixels.
+        width: u32,
+        /// Height in physical pixels.
+        height: u32,
+    },
+
+    // --- Phase 3: UIA ---
+    /// Result of `UiaTree`.
+    UiaTree {
+        /// Walked subtree root with cache-fetched properties.
+        root: UIANode,
+        /// True if heuristic flagged the tree as degraded (UIA-10).
+        degraded: bool,
+    },
+    /// Result of `UiaQuery`.
+    UiaQuery {
+        /// Matched nodes (cache-fetched).
+        matches: Vec<UIANode>,
+        /// True if the underlying tree was degraded.
+        degraded: bool,
+    },
+    /// Result of `InspectAtPoint`.
+    Inspect {
+        /// Single element under the probe point.
+        node: UIANode,
+        /// True if the owning window's tree was degraded.
+        degraded: bool,
+    },
+    /// Result of `WaitForElement` and the boolean half of element actions.
+    Element {
+        /// True if the selector resolved (or, for waits, found a match before
+        /// timeout).
+        matched: bool,
+    },
+
     // --- Phase 4 ---
     /// `clipboard_get` reply.
     ClipboardGet(ClipboardGetResp),
@@ -778,6 +903,103 @@ mod tests {
         let decoded: Error = decode_frame(&mut cur).unwrap();
         assert_eq!(decoded.code, crate::error::ErrorCode::PermissionRequired);
         assert_eq!(decoded.hint.as_deref(), Some("restart with --allow=shell_exec"));
+    }
+
+    #[test]
+    fn phase3_capture_requests_round_trip() {
+        let r1 = Request::Screenshot {
+            monitor: Some(1),
+            format: Some(ImageFormat::Png),
+        };
+        let bytes = encode_frame(&r1).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(r1, decoded);
+
+        let r2 = Request::ScreenshotRegion {
+            x: 10,
+            y: 20,
+            w: 320,
+            h: 240,
+            monitor: None,
+            format: None,
+        };
+        let bytes = encode_frame(&r2).unwrap();
+        let mut cur = Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(r2, decoded);
+    }
+
+    #[test]
+    fn phase3_uia_requests_round_trip() {
+        use crate::selector::Selector;
+        use crate::uia_node::ControlType;
+
+        let cases = vec![
+            Request::UiaTree {
+                hwnd: Some(0xdead_beef),
+                depth: Some(3),
+                view: Some(TreeView::Raw),
+            },
+            Request::UiaQuery {
+                selector: Selector::ByControlType(ControlType::Button),
+                root_hwnd: None,
+            },
+            Request::InspectAtPoint { x: 100, y: 200 },
+            Request::ClickElement {
+                selector: Selector::ByName("OK".into()),
+                modifiers: Some(vec!["ctrl".into()]),
+            },
+            Request::TypeIntoElement {
+                selector: Selector::ByAutomationId("editor".into()),
+                text: Redact::new("hello".to_string()),
+            },
+            Request::WaitForElement {
+                selector: Selector::ByName("Loaded".into()),
+                timeout_ms: 1000,
+            },
+            Request::ScrollIntoView {
+                selector: Selector::ByClass("ListItem".into()),
+            },
+        ];
+        for r in cases {
+            let bytes = encode_frame(&r).unwrap();
+            let mut cur = Cursor::new(bytes);
+            let decoded: Request = decode_frame(&mut cur).unwrap();
+            assert_eq!(r, decoded);
+        }
+    }
+
+    #[test]
+    fn phase3_responses_round_trip() {
+        let nodes = vec![crate::uia_node::UIANode::empty()];
+        let cases = vec![
+            Response::Screenshot {
+                bytes: Redact::new(vec![1, 2, 3]),
+                mime: "image/jpeg".into(),
+                width: 1920,
+                height: 1080,
+            },
+            Response::UiaTree {
+                root: crate::uia_node::UIANode::empty(),
+                degraded: false,
+            },
+            Response::UiaQuery {
+                matches: nodes,
+                degraded: true,
+            },
+            Response::Inspect {
+                node: crate::uia_node::UIANode::empty(),
+                degraded: false,
+            },
+            Response::Element { matched: true },
+        ];
+        for r in cases {
+            let bytes = encode_frame(&r).unwrap();
+            let mut cur = Cursor::new(bytes);
+            let decoded: Response = decode_frame(&mut cur).unwrap();
+            assert_eq!(r, decoded);
+        }
     }
 
     #[test]

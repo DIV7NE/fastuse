@@ -55,6 +55,13 @@ embed-resource = "2"
 syn = { version = "2", features = ["full", "visit"] }
 walkdir = "2"
 
+# Phase 3 capture / encode
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
+
+# Phase 3 benches
+criterion = "0.5"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
