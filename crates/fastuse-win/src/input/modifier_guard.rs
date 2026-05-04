@@ -5,7 +5,6 @@
 //! writer is the single input thread.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 
 use fastuse_proto::ModKey;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
@@ -13,9 +12,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 use crate::input::sendinput::{key_vk, send};
 
 thread_local! {
-    /// Modifiers currently DOWN on the input thread. Use `BTreeSet` so the
-    /// emission order is deterministic for tests.
-    static HELD: RefCell<BTreeSet<u8>> = const { RefCell::new(BTreeSet::new()) };
+    /// Modifiers currently DOWN on the input thread, in press order.
+    /// WR-01: ordered `Vec` (with manual dedupe) so the panic-flush path
+    /// can release in reverse-press order — `BTreeSet` iteration gave
+    /// tag-ascending order which leaks Ctrl+Win as a Win-up-while-Alt-down
+    /// trigger on some drivers.
+    static HELD: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// CR-03: primary key currently DOWN as part of an in-flight `hold_key`.
+    /// Stored as a single pre-built KEYUP `INPUT` so the panic-hook flush
+    /// can release it without re-deriving the chord. `None` when no hold is
+    /// in flight.
+    static PRIMARY_KEY_UP: RefCell<Option<INPUT>> = const { RefCell::new(None) };
 }
 
 fn modkey_tag(m: ModKey) -> u8 {
@@ -41,12 +48,17 @@ fn tag_to_vk(tag: u8) -> u16 {
 /// Returns a [`ModifierGuard`] whose `Drop` releases everything still held.
 pub fn press_chord(mods: &[ModKey]) -> ModifierGuard {
     let mut events: Vec<INPUT> = Vec::with_capacity(mods.len());
+    let mut owned: Vec<u8> = Vec::with_capacity(mods.len());
     HELD.with(|h| {
         let mut held = h.borrow_mut();
         for &m in mods {
             let tag = modkey_tag(m);
-            if held.insert(tag) {
+            if !held.contains(&tag) {
+                held.push(tag);
                 events.push(key_vk(m.vk(), false));
+            }
+            if !owned.contains(&tag) {
+                owned.push(tag);
             }
         }
     });
@@ -55,24 +67,51 @@ pub fn press_chord(mods: &[ModKey]) -> ModifierGuard {
         // propagate via send() return value on the next call.
         let _ = send(&events);
     }
-    ModifierGuard {
-        owned: mods.iter().map(|m| modkey_tag(*m)).collect(),
+    ModifierGuard { owned }
+}
+
+/// Release every modifier currently held in this thread's registry, plus any
+/// in-flight primary key tracked by `hold_key` (CR-03).
+///
+/// Emits a single batched `SendInput` with all KEYUPs (CONTEXT.md hard rule).
+/// Modifiers are released in reverse-press order (WR-01).
+pub fn release_all_held() {
+    let mut events: Vec<INPUT> = Vec::new();
+    // Primary key first (so the OS sees key-up before the modifier-up that
+    // might re-trigger a chord).
+    PRIMARY_KEY_UP.with(|p| {
+        if let Some(ev) = p.borrow_mut().take() {
+            events.push(ev);
+        }
+    });
+    HELD.with(|h| {
+        let mut held = h.borrow_mut();
+        if held.is_empty() && events.is_empty() {
+            return;
+        }
+        // WR-01: iterate in reverse-press order so the last-pressed modifier
+        // releases first.
+        for &tag in held.iter().rev() {
+            events.push(key_vk(tag_to_vk(tag), true));
+        }
+        held.clear();
+    });
+    if !events.is_empty() {
+        let _ = send(&events);
     }
 }
 
-/// Release every modifier currently held in this thread's registry.
-///
-/// Emits a single batched `SendInput` with all KEYUPs (CONTEXT.md hard rule).
-pub fn release_all_held() {
-    HELD.with(|h| {
-        let mut held = h.borrow_mut();
-        if held.is_empty() {
-            return;
-        }
-        let events: Vec<INPUT> = held.iter().map(|&tag| key_vk(tag_to_vk(tag), true)).collect();
-        held.clear();
-        let _ = send(&events);
-    });
+/// CR-03: register the in-flight primary-key UP event so a panic during
+/// `hold_key`'s sleep flushes it via `release_all_held`. Replaces any prior
+/// in-flight key (callers must not stack holds on the same input thread).
+pub(crate) fn set_primary_key_up(ev: INPUT) {
+    PRIMARY_KEY_UP.with(|p| *p.borrow_mut() = Some(ev));
+}
+
+/// CR-03: clear the primary-key registration after a successful manual
+/// release; idempotent.
+pub(crate) fn clear_primary_key_up() {
+    PRIMARY_KEY_UP.with(|p| *p.borrow_mut() = None);
 }
 
 /// Number of modifiers currently held (test helper).
@@ -84,6 +123,7 @@ pub fn held_count() -> usize {
 #[cfg(any(test, feature = "mock-sendinput"))]
 pub fn clear_for_test() {
     HELD.with(|h| h.borrow_mut().clear());
+    PRIMARY_KEY_UP.with(|p| *p.borrow_mut() = None);
 }
 
 /// RAII wrapper. On drop, releases the modifiers it knows about (and any
@@ -111,7 +151,8 @@ impl ModifierGuard {
             // Reverse order to match press_chord's semantics (last-pressed
             // released first — matches user intent).
             for &tag in self.owned.iter().rev() {
-                if held.remove(&tag) {
+                if let Some(pos) = held.iter().position(|&t| t == tag) {
+                    held.remove(pos);
                     events.push(key_vk(tag_to_vk(tag), true));
                 }
             }

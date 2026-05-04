@@ -86,26 +86,60 @@ fn main() {
     // Initialize UIPI integrity-level cache before any input dispatches.
     fastuse_win::input::uipi::init_our_integrity_level();
 
+    // WR-09: install the panic hook BEFORE any thread that could touch HELD
+    // exists. The hook reads from a shared slot that we populate after
+    // spawn_input_thread succeeds. A panic during input-thread startup runs
+    // through this hook even though the slot is still None — the hook then
+    // simply skips the flush (registry is empty by definition).
+    //
+    // CR-04: hook also detects "panic on the input thread itself" via the
+    // recorded thread id — calling InputThreadHandle::send from inside the
+    // input thread's own panic would deadlock (recv waits for a reply the
+    // panicking thread will never produce). When the panicking thread IS
+    // the input thread we flush HELD directly (it's a thread_local on this
+    // very thread, so the inline call drains it correctly).
+    type InputSlot =
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<fastuse_win::input_thread::InputThreadHandle>>>>;
+    let input_slot: InputSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    {
+        let input_for_panic: InputSlot = std::sync::Arc::clone(&input_slot);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // Snapshot the handle (and its thread id) under the mutex.
+            let snapshot: Option<std::sync::Arc<fastuse_win::input_thread::InputThreadHandle>> =
+                input_for_panic.lock().ok().and_then(|g| g.as_ref().cloned());
+            if let Some(h) = snapshot {
+                // SAFETY: GetCurrentThreadId is always safe.
+                let here = unsafe {
+                    windows::Win32::System::Threading::GetCurrentThreadId()
+                };
+                if here == h.thread_id() {
+                    // We ARE the input thread mid-panic. Flush its
+                    // thread_local registry directly (CR-04).
+                    fastuse_win::input::handlers::flush_held_modifiers();
+                } else {
+                    // Different thread panicked; channel-send is safe.
+                    let _ = h.send(fastuse_win::input_thread::InputJob::FlushHeldModifiers);
+                }
+            }
+            prev(info);
+        }));
+    }
+
     // Spawn fastuse-win worker threads. Held for daemon lifetime.
     let input = match fastuse_win::input_thread::spawn_input_thread() {
-        Ok(h) => Some(std::sync::Arc::new(h)),
+        Ok(h) => {
+            let arc = std::sync::Arc::new(h);
+            if let Ok(mut slot) = input_slot.lock() {
+                *slot = Some(std::sync::Arc::clone(&arc));
+            }
+            Some(arc)
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to spawn input thread");
             None
         }
     };
-
-    // Phase 2: panic hook flushes held modifiers via the input thread channel.
-    {
-        let input_for_panic = input.clone();
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if let Some(h) = input_for_panic.as_ref() {
-                let _ = h.send(fastuse_win::input_thread::InputJob::FlushHeldModifiers);
-            }
-            prev(info);
-        }));
-    }
     let uia = match fastuse_win::uia_pool::spawn_uia_pool(3) {
         Ok(h) => Some(h),
         Err(e) => {

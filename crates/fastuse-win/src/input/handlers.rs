@@ -20,7 +20,9 @@ use fastuse_proto::{
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 
 use crate::input::cursor::set_cursor_pos;
-use crate::input::modifier_guard::{press_chord, release_all_held};
+use crate::input::modifier_guard::{
+    clear_primary_key_up, press_chord, release_all_held, set_primary_key_up,
+};
 use crate::input::sendinput::{
     key_unicode, key_unicode_str, key_vk, mouse_button_absolute, mouse_button_flags, mouse_wheel, send,
 };
@@ -219,17 +221,28 @@ pub fn hold_key(chord_str: &str, duration_ms: u32) -> Result<(), ProtoError> {
     let chord = parse(chord_str)?;
     let _guard = press_chord(&chord.mods);
 
-    // Press primary key DOWN.
-    let down_ev = match chord.key {
-        ChordKey::Vk(vk) => key_vk(vk, false),
+    // Build DOWN/UP for the primary key.
+    let (down_ev, up_ev) = match chord.key {
+        ChordKey::Vk(vk) => (key_vk(vk, false), key_vk(vk, true)),
         ChordKey::Unicode(c) => {
             let mut buf = [0u16; 2];
             let units = c.encode_utf16(&mut buf);
             // Only a single-unit Unicode hold supported (most common).
-            key_unicode(units[0], false)
+            (key_unicode(units[0], false), key_unicode(units[0], true))
         }
     };
-    send(&[down_ev]).map_err(ProtoError::from)?;
+
+    // CR-03: register the UP event in the thread-local registry BEFORE we
+    // send the DOWN. If a panic fires during the sleep below, the
+    // panic-hook flush (`release_all_held`) emits this UP and the user's
+    // primary key does not stay stuck.
+    set_primary_key_up(up_ev);
+    send(&[down_ev]).map_err(|e| {
+        // Roll back registration on send failure — there is no down to
+        // pair the up with.
+        clear_primary_key_up();
+        ProtoError::from(e)
+    })?;
 
     // Sleep on the input thread (fine — caller queued exactly this work).
     // panic::catch_unwind is set up at the dispatcher edge (Task 13 wiring).
@@ -241,15 +254,9 @@ pub fn hold_key(chord_str: &str, duration_ms: u32) -> Result<(), ProtoError> {
         std::thread::sleep(remaining.min(Duration::from_millis(50)));
     }
 
-    // Release primary key.
-    let up_ev = match chord.key {
-        ChordKey::Vk(vk) => key_vk(vk, true),
-        ChordKey::Unicode(c) => {
-            let mut buf = [0u16; 2];
-            let units = c.encode_utf16(&mut buf);
-            key_unicode(units[0], true)
-        }
-    };
+    // Normal-path release: clear the registry first so the panic-hook
+    // doesn't double-release, then emit the UP.
+    clear_primary_key_up();
     send(&[up_ev]).map_err(ProtoError::from)?;
     // _guard drops → modifiers released.
     Ok(())
@@ -257,6 +264,13 @@ pub fn hold_key(chord_str: &str, duration_ms: u32) -> Result<(), ProtoError> {
 
 /// Belt-and-suspenders: flush all held modifiers. Called by the daemon's
 /// panic hook and by the input-thread teardown.
+///
+/// **Must be called on the input STA thread** (WR-08). The held-modifier
+/// registry is `thread_local!`, so calling this from any other thread
+/// (e.g. a tokio worker) reads an empty registry and silently no-ops.
+/// The daemon's panic hook routes this through `InputJob::FlushHeldModifiers`
+/// when the panicking thread is NOT the input thread, and inlines the call
+/// when it IS the input thread (CR-04).
 pub fn flush_held_modifiers() {
     release_all_held();
 }

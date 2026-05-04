@@ -14,8 +14,8 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTME
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    PostMessageW, PostThreadMessageW, RegisterClassExW, TranslateMessage, UnregisterClassW,
-    CW_USEDEFAULT, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DISPLAYCHANGE,
+    PostThreadMessageW, RegisterClassExW, TranslateMessage, UnregisterClassW, CW_USEDEFAULT,
+    HMENU, MSG, WS_DISABLED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WM_DISPLAYCHANGE,
     WM_QUIT, WM_USER, WNDCLASSEXW,
 };
 
@@ -70,6 +70,15 @@ pub struct InputThreadHandle {
 }
 
 impl InputThreadHandle {
+    /// CR-04: thread id of the input STA worker. Callers (notably the daemon
+    /// panic hook) compare against `GetCurrentThreadId` to detect "we are
+    /// the input thread" and flush directly instead of going through the
+    /// channel — sending to the channel deadlocks when the input thread is
+    /// itself mid-panic.
+    pub fn thread_id(&self) -> u32 {
+        self.thread_id
+    }
+
     /// Send a job to the input thread; blocks for the reply. Phase 1
     /// preserved this signature for the Noop probe and the new
     /// FlushHeldModifiers variant.
@@ -190,18 +199,25 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
             // SAFETY: WNDCLASSEXW is fully populated above; class registration is idempotent.
             let _ = unsafe { RegisterClassExW(&wc) };
 
-            // SAFETY: Creating a HWND_MESSAGE window with our registered class.
+            // CR-02 fix: must be a *top-level* window (parent = None) so the
+            // OS delivers WM_DISPLAYCHANGE — message-only windows (HWND_MESSAGE)
+            // do NOT receive system broadcasts and the monitor-cache invalidation
+            // hook would otherwise be silently dead. The window is invisible
+            // (no WS_VISIBLE), disabled (WS_DISABLED) so it can't receive focus,
+            // hidden from the taskbar (WS_EX_TOOLWINDOW), and refuses activation
+            // (WS_EX_NOACTIVATE).
+            // SAFETY: registered class, valid args; null parent makes a top-level.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     class_name,
                     w!("fastuse-input"),
-                    WINDOW_STYLE(0),
+                    WS_POPUP | WS_DISABLED,
                     CW_USEDEFAULT,
                     CW_USEDEFAULT,
                     0,
                     0,
-                    Some(HWND_MESSAGE),
+                    None,
                     Some(HMENU::default()),
                     Some(hinstance.into()),
                     None,
