@@ -50,8 +50,14 @@ pub fn current_user_only() -> std::io::Result<OwnedSecurityDescriptor> {
     // 1. Get current user SID into a heap buffer (kept alive by OwnedSecurityDescriptor).
     let sid_buf = current_user_sid_buf()?;
     // SAFETY: sid_buf holds a TOKEN_USER struct followed by the SID payload.
-    let token_user = unsafe { &*(sid_buf.as_ptr() as *const TOKEN_USER) };
-    let sid_ptr = token_user.User.Sid;
+    // Vec<u8> is only byte-aligned, but TOKEN_USER contains pointers that
+    // require natural alignment — use read_unaligned to avoid UB (CR-03).
+    // The PSID pointer it returns refers into the same heap buffer, which
+    // OwnedSecurityDescriptor keeps alive in `_sid_buf`.
+    let sid_ptr = unsafe {
+        let p = sid_buf.as_ptr() as *const TOKEN_USER;
+        std::ptr::read_unaligned(p).User.Sid
+    };
 
     // 2. Build EXPLICIT_ACCESS_W granting GENERIC_ALL to that SID.
     let ea = EXPLICIT_ACCESS_W {

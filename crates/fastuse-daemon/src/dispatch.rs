@@ -15,6 +15,8 @@ pub struct DispatchCtx {
     pub session_id: u32,
     pub input: Option<Arc<InputThreadHandle>>,
     pub shutdown_flag: Arc<AtomicBool>,
+    /// Reconciled idle timeout reported on every Welcome (D-22).
+    pub idle_timeout_secs: u64,
 }
 
 /// Outcome of dispatching a single frame.
@@ -36,7 +38,7 @@ pub fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
         // second one, treat it as a no-op echo.
         Request::Hello { .. } => Response::Welcome {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-            current_idle_timeout_secs: 0,
+            current_idle_timeout_secs: ctx.idle_timeout_secs as u32,
         },
         Request::Ping { ts_us } => {
             // Optionally fan out a Noop to the input thread to populate
@@ -57,7 +59,7 @@ pub fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             ctx.shutdown_flag.store(true, Ordering::SeqCst);
             Response::Welcome {
                 daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-                current_idle_timeout_secs: 0,
+                current_idle_timeout_secs: ctx.idle_timeout_secs as u32,
             }
         }
     };

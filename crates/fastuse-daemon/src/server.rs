@@ -44,6 +44,13 @@ pub async fn serve(
     // (it's acceptable to report 0). The dispatch ctx still has the field.
     let _ = input;
 
+    // Track whether we're creating the first pipe instance. The first
+    // CreateNamedPipeW must use first_pipe_instance(true) to refuse to start
+    // under a squatter that already owns the pipe name with a permissive
+    // DACL (T-01-01). Subsequent instances flip to false to allow the loop
+    // to keep accepting concurrent clients on the same name.
+    let mut first = true;
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             tracing::info!("shutdown flag set; exiting accept loop");
@@ -56,10 +63,11 @@ pub async fn serve(
         // as `sd` (this scope = function body).
         let server = unsafe {
             ServerOptions::new()
-                .first_pipe_instance(false)
+                .first_pipe_instance(first)
                 .max_instances(254)
                 .create_with_security_attributes_raw(&pipe_path, sa_ptr(&mut sd))
         }?;
+        first = false;
 
         // Wait for a client to connect.
         let connect_res = tokio::select! {
@@ -82,6 +90,7 @@ pub async fn serve(
             session_id,
             input: input_arc.clone(),
             shutdown_flag: Arc::clone(&shutdown),
+            idle_timeout_secs,
         };
 
         tokio::spawn(async move {
@@ -105,11 +114,16 @@ async fn wait_shutdown(flag: Arc<AtomicBool>) {
 }
 
 async fn serve_connection(mut pipe: NamedPipeServer, ctx: DispatchCtx) -> std::io::Result<()> {
+    // Wrap the dispatch ctx in an Arc so we can hand owned clones to
+    // `spawn_blocking` without requiring `'static` borrows of the connection
+    // task's locals. `DispatchCtx` is cheap to clone (Arc-internals only).
+    let ctx = std::sync::Arc::new(ctx);
+
     // Hello/Welcome handshake.
     let _hello: Request = read_frame(&mut pipe).await?;
     let welcome = Response::Welcome {
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-        current_idle_timeout_secs: 0,
+        current_idle_timeout_secs: ctx.idle_timeout_secs as u32,
     };
     write_frame(&mut pipe, &welcome).await?;
 
@@ -121,7 +135,14 @@ async fn serve_connection(mut pipe: NamedPipeServer, ctx: DispatchCtx) -> std::i
             Err(e) => return Err(e),
         };
         let pipe_recv = Instant::now();
-        let result = handle(req, &ctx);
+        // Dispatch may perform a blocking sync mpsc::recv on the input thread
+        // round-trip (D-26: no Win32 work on tokio workers). Punt to a
+        // blocking-friendly thread to keep the runtime's worker threads free
+        // for other connections (CR-02).
+        let ctx_for_dispatch = std::sync::Arc::clone(&ctx);
+        let result = tokio::task::spawn_blocking(move || handle(req, &ctx_for_dispatch))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("dispatch join: {e}")))?;
         let pipe_rtt_us = pipe_recv.elapsed().as_micros() as i64;
         tracing::info!(
             pipe_rtt_us,

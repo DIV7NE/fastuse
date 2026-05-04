@@ -103,12 +103,16 @@ fn current_user_sid_short() -> Result<u32, PipeIdentityError> {
     }
 
     // SAFETY: buf holds a TOKEN_USER followed by the SID payload; layout-compatible.
+    // Use read_unaligned because Vec<u8> is only byte-aligned but TOKEN_USER
+    // contains pointer fields that require pointer alignment (CR-03).
     if buf.len() < size_of::<TOKEN_USER>() {
         unsafe { let _ = CloseHandle(token_handle); }
         return Err(PipeIdentityError::TokenInfo(0));
     }
-    let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
-    let sid_ptr = token_user.User.Sid;
+    let sid_ptr = unsafe {
+        let p = buf.as_ptr() as *const TOKEN_USER;
+        std::ptr::read_unaligned(p).User.Sid
+    };
 
     let mut sid_string_ptr = PWSTR::null();
     let res = unsafe { ConvertSidToStringSidW(sid_ptr, &mut sid_string_ptr) };
