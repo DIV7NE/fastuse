@@ -34,6 +34,22 @@ pub enum ErrorCode {
     InputBlockedHang,
     /// Chord string failed to parse (Phase 2).
     InvalidChord,
+    /// Confirmed-tier tool called without `--allow=<tool>` (Phase 4).
+    PermissionRequired,
+    /// Deny-list match or daemon-self-PID protection (Phase 4).
+    PermissionBlocked,
+    /// `shell_exec` exceeded its timeout (Phase 4).
+    ShellTimeout,
+    /// `shell_exec` output exceeded the 1 MiB cap (Phase 4).
+    ShellOutputTruncated,
+    /// `launch_app` could not resolve a query to any binary / AUMID / .lnk (Phase 4).
+    AppNotFound,
+    /// `kill_process` selector matched no running process (Phase 4).
+    ProcessNotFound,
+    /// `.lnk` resolution returned an empty target (shell-folder path) (Phase 4).
+    LnkResolutionFailed,
+    /// UWP AUMID activation returned non-S_OK (Phase 4).
+    AumidActivationFailed,
 }
 
 impl ErrorCode {
@@ -51,6 +67,14 @@ impl ErrorCode {
             Self::MonitorNotFound => "MONITOR_NOT_FOUND",
             Self::InputBlockedHang => "INPUT_BLOCKED_HANG",
             Self::InvalidChord => "INVALID_CHORD",
+            Self::PermissionRequired => "PERMISSION_REQUIRED",
+            Self::PermissionBlocked => "PERMISSION_BLOCKED",
+            Self::ShellTimeout => "SHELL_TIMEOUT",
+            Self::ShellOutputTruncated => "SHELL_OUTPUT_TRUNCATED",
+            Self::AppNotFound => "APP_NOT_FOUND",
+            Self::ProcessNotFound => "PROCESS_NOT_FOUND",
+            Self::LnkResolutionFailed => "LNK_RESOLUTION_FAILED",
+            Self::AumidActivationFailed => "AUMID_ACTIVATION_FAILED",
         }
     }
 }
@@ -114,6 +138,14 @@ mod tests {
             ErrorCode::MonitorNotFound,
             ErrorCode::InputBlockedHang,
             ErrorCode::InvalidChord,
+            ErrorCode::PermissionRequired,
+            ErrorCode::PermissionBlocked,
+            ErrorCode::ShellTimeout,
+            ErrorCode::ShellOutputTruncated,
+            ErrorCode::AppNotFound,
+            ErrorCode::ProcessNotFound,
+            ErrorCode::LnkResolutionFailed,
+            ErrorCode::AumidActivationFailed,
         ] {
             let err = Error::new(code, "test message");
             let bytes = encode_frame(&err).unwrap();
@@ -138,5 +170,13 @@ mod tests {
         assert_eq!(ErrorCode::MonitorNotFound.as_str(), "MONITOR_NOT_FOUND");
         assert_eq!(ErrorCode::InputBlockedHang.as_str(), "INPUT_BLOCKED_HANG");
         assert_eq!(ErrorCode::InvalidChord.as_str(), "INVALID_CHORD");
+        assert_eq!(ErrorCode::PermissionRequired.as_str(), "PERMISSION_REQUIRED");
+        assert_eq!(ErrorCode::PermissionBlocked.as_str(), "PERMISSION_BLOCKED");
+        assert_eq!(ErrorCode::ShellTimeout.as_str(), "SHELL_TIMEOUT");
+        assert_eq!(ErrorCode::ShellOutputTruncated.as_str(), "SHELL_OUTPUT_TRUNCATED");
+        assert_eq!(ErrorCode::AppNotFound.as_str(), "APP_NOT_FOUND");
+        assert_eq!(ErrorCode::ProcessNotFound.as_str(), "PROCESS_NOT_FOUND");
+        assert_eq!(ErrorCode::LnkResolutionFailed.as_str(), "LNK_RESOLUTION_FAILED");
+        assert_eq!(ErrorCode::AumidActivationFailed.as_str(), "AUMID_ACTIVATION_FAILED");
     }
 }

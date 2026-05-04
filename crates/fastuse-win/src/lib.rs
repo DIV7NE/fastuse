@@ -16,12 +16,16 @@
 #[cfg(all(windows, not(target_pointer_width = "64")))]
 compile_error!("fastuse-win requires a 64-bit Windows target");
 
+pub mod capture_thread;
+pub mod clipboard;
 pub mod com;
 pub mod dpi;
 pub mod input;
 pub mod input_thread;
+pub mod launch;
+pub mod process;
+pub mod shell;
 pub mod uia_pool;
-pub mod capture_thread;
 pub mod window;
 
 pub use com::increment_mta_once;

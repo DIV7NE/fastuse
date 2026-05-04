@@ -9,10 +9,15 @@
 
 #![deny(missing_docs)]
 
+pub mod error;
 pub mod hot_state;
 pub mod local_app_data;
+pub mod perm;
 pub mod pipe_path;
+pub mod shell;
 
+pub use error::FastuseError;
 pub use hot_state::HotState;
 pub use local_app_data::local_app_data;
+pub use perm::{resolve as resolve_perm, hint as perm_hint, SessionAllow, Tier};
 pub use pipe_path::{pipe_path_resolve, PipeIdentity};
