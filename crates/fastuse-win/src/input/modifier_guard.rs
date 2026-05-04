@@ -81,7 +81,7 @@ pub fn held_count() -> usize {
 }
 
 /// Forcibly clear the registry without emitting any events (test helper).
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-sendinput"))]
 pub fn clear_for_test() {
     HELD.with(|h| h.borrow_mut().clear());
 }

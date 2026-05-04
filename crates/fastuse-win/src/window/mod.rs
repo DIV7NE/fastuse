@@ -8,10 +8,10 @@ pub mod list_windows;
 pub mod monitors;
 pub mod move_resize;
 
+use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, MAX_PATH, RECT};
-use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
@@ -72,7 +72,8 @@ pub fn build_window_info(hwnd: HWND) -> Result<WindowInfo, ProtoError> {
 }
 
 fn process_basename(pid: u32) -> Option<String> {
-    // SAFETY: opening a process for query-only.
+    // SAFETY: opening a process with QUERY_LIMITED_INFORMATION (works for
+    // most foreign processes including elevated ones in our session).
     let proc: HANDLE = unsafe {
         match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(h) => h,
@@ -80,13 +81,30 @@ fn process_basename(pid: u32) -> Option<String> {
         }
     };
     let mut buf = vec![0u16; MAX_PATH as usize];
-    // SAFETY: buf is sized for MAX_PATH; len is in u16 units.
-    let n = unsafe { GetModuleBaseNameW(proc, None, &mut buf) };
+    let mut len: u32 = buf.len() as u32;
+    // QueryFullProcessImageNameW works with PROCESS_QUERY_LIMITED_INFORMATION
+    // (GetModuleBaseNameW requires PROCESS_VM_READ which we deliberately do
+    // not request — Rule 1 fix discovered during dpi_mixed E2E).
+    // SAFETY: proc is a valid handle; buf/len describe the output buffer.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            proc,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    };
     let _ = unsafe { CloseHandle(proc) };
-    if n == 0 {
+    if ok.is_err() || len == 0 {
         return None;
     }
-    Some(String::from_utf16_lossy(&buf[..n as usize]))
+    let full = String::from_utf16_lossy(&buf[..len as usize]);
+    // Basename: strip everything up to and including the last backslash.
+    let basename = full
+        .rsplit_once('\\')
+        .map(|(_, b)| b.to_string())
+        .unwrap_or(full);
+    Some(basename)
 }
 
 /// Build the standard `WindowNotFound` error.
