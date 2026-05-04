@@ -9,9 +9,13 @@
 #![deny(missing_docs)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
+pub mod clipboard;
 pub mod com;
 pub mod dpi;
 pub mod input_thread;
+pub mod launch;
+pub mod process;
+pub mod shell;
 pub mod uia_pool;
 pub mod capture_thread;
 
