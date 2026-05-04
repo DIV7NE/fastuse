@@ -146,6 +146,23 @@ pub fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
         Request::ResizeMoveWindow { hwnd, x, y, w, h } => {
             run_unit(ctx, &mut win32_us, move || resize_move_window(hwnd, x, y, w, h))
         }
+
+        // -------- Phase 3: capture + UIA (handlers land in Tasks 04-18) --------
+        // These arms exist so the wire surface is exhaustive against
+        // Request; full DXGI / UIA handlers are wired in subsequent commits.
+        Request::Screenshot { .. }
+        | Request::ScreenshotRegion { .. }
+        | Request::UiaTree { .. }
+        | Request::UiaQuery { .. }
+        | Request::InspectAtPoint { .. }
+        | Request::ClickElement { .. }
+        | Request::TypeIntoElement { .. }
+        | Request::WaitForElement { .. }
+        | Request::ScrollIntoView { .. } => Response::Error(Error::new(
+            ErrorCode::Internal,
+            "Phase 3 handler not yet wired — Tasks 04-18 land DXGI/UIA backends".to_string(),
+        )
+        .with_hint("rebuild after subsequent Phase 3 commits".to_string())),
     };
 
     DispatchResult {

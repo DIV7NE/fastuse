@@ -34,6 +34,18 @@ pub enum ErrorCode {
     InputBlockedHang,
     /// Chord string failed to parse (Phase 2).
     InvalidChord,
+    /// UIA tree heuristically degraded (Electron, JavaFX, Discord) —
+    /// surfaced as a hint on response payloads, also emitted as an error
+    /// for the rare hard-degraded case where the root is unreadable
+    /// (Phase 3 UIA-10).
+    UiaDegraded,
+    /// UIA selector resolved to zero elements (Phase 3 UIA-05/06/08).
+    ElementNotFound,
+    /// DXGI duplication object lost beyond a single retry; client should
+    /// retry the screenshot call which will reacquire (Phase 3 CAP-03).
+    CaptureLost,
+    /// JPEG/PNG/mtpng encoder rejected the frame (Phase 3 CAP-05).
+    EncodeFailed,
 }
 
 impl ErrorCode {
@@ -51,6 +63,10 @@ impl ErrorCode {
             Self::MonitorNotFound => "MONITOR_NOT_FOUND",
             Self::InputBlockedHang => "INPUT_BLOCKED_HANG",
             Self::InvalidChord => "INVALID_CHORD",
+            Self::UiaDegraded => "UIA_DEGRADED",
+            Self::ElementNotFound => "ELEMENT_NOT_FOUND",
+            Self::CaptureLost => "CAPTURE_LOST",
+            Self::EncodeFailed => "ENCODE_FAILED",
         }
     }
 }
@@ -114,6 +130,10 @@ mod tests {
             ErrorCode::MonitorNotFound,
             ErrorCode::InputBlockedHang,
             ErrorCode::InvalidChord,
+            ErrorCode::UiaDegraded,
+            ErrorCode::ElementNotFound,
+            ErrorCode::CaptureLost,
+            ErrorCode::EncodeFailed,
         ] {
             let err = Error::new(code, "test message");
             let bytes = encode_frame(&err).unwrap();
@@ -138,5 +158,9 @@ mod tests {
         assert_eq!(ErrorCode::MonitorNotFound.as_str(), "MONITOR_NOT_FOUND");
         assert_eq!(ErrorCode::InputBlockedHang.as_str(), "INPUT_BLOCKED_HANG");
         assert_eq!(ErrorCode::InvalidChord.as_str(), "INVALID_CHORD");
+        assert_eq!(ErrorCode::UiaDegraded.as_str(), "UIA_DEGRADED");
+        assert_eq!(ErrorCode::ElementNotFound.as_str(), "ELEMENT_NOT_FOUND");
+        assert_eq!(ErrorCode::CaptureLost.as_str(), "CAPTURE_LOST");
+        assert_eq!(ErrorCode::EncodeFailed.as_str(), "ENCODE_FAILED");
     }
 }
