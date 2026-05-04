@@ -78,10 +78,115 @@ pub struct AckOutput {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
+pub struct ActionResultOutput {
+    pub ok: bool,
+    pub wait_matched: Option<bool>,
+    pub waited_ms: Option<u32>,
+    pub screenshot: Option<ScreenshotOutput>,
+}
+
+/// Untagged union returned by every action tool.
+///
+/// - `Ack`     — action completed, no post-action opts triggered.
+/// - `Element` — element-targeted action (matched=true/false).
+/// - `Result`  — action completed with post-action opts (wait / screenshot).
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ActionOrAck {
+    Ack(AckOutput),
+    Element(ElementMatchOutput),
+    Result(ActionResultOutput),
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CursorOutput {
     pub x: i32,
     pub y: i32,
     pub monitor_id: u64,
+}
+
+// ---------- shared action opts input fragment ----------
+
+/// Optional post-action perception arguments that can be flattened into any
+/// action input schema via `#[serde(flatten, default)]`.
+#[derive(Default, Deserialize, schemars::JsonSchema)]
+pub struct ActionOptsArgs {
+    /// UIA selector JSON to poll after the action until it matches.
+    /// Default timeout 2000ms; override via `wait_timeout_ms`.
+    pub wait_for: Option<serde_json::Value>,
+    /// Like `wait_for` but failure is treated as an error.
+    pub verify: Option<serde_json::Value>,
+    /// Capture a screenshot after the action (and after `wait_for` if set).
+    /// Pass `true` for full-primary-monitor JPEG. Pass `"png"` or
+    /// `{ "region": "auto", "format": "png" }` for more control.
+    /// All formats resolve to `ActionResultOutput.screenshot`.
+    pub screenshot_after: Option<serde_json::Value>,
+    /// Timeout shared by `wait_for` and `verify` in milliseconds.
+    pub wait_timeout_ms: Option<u32>,
+}
+
+fn build_action_opts(a: ActionOptsArgs) -> Result<Option<fastuse_proto::ActionOpts>, McpError> {
+    use fastuse_proto::{ActionOpts, RegionSpec, ScreenshotOpts, ImageFormat};
+
+    // If no opts fields are set at all, propagate None so legacy dispatch
+    // returns Response::Ack / Response::Element unchanged.
+    if a.wait_for.is_none() && a.verify.is_none() && a.screenshot_after.is_none() && a.wait_timeout_ms.is_none() {
+        return Ok(None);
+    }
+
+    let wait_for = a.wait_for.map(parse_selector).transpose()?;
+    let verify = a.verify.map(parse_selector).transpose()?;
+
+    // `screenshot_after` accepts three shapes:
+    //  - `true`           → full primary monitor JPEG (most common agent use case)
+    //  - `"png"` / `"jpeg"` → full monitor with explicit format
+    //  - `{ "region": "auto"|{x,y,w,h}, "format": "jpeg"|"png", "quality": N }`
+    let screenshot_after = match a.screenshot_after {
+        None => None,
+        Some(v) => {
+            let opts = if v == serde_json::Value::Bool(true) {
+                ScreenshotOpts { region: None, format: Some(ImageFormat::Jpeg), quality: None }
+            } else if let Some(fmt) = v.as_str() {
+                let format = Some(parse_image_format(Some(fmt)));
+                ScreenshotOpts { region: None, format, quality: None }
+            } else if v.is_object() {
+                #[derive(Deserialize)]
+                struct SSOpts {
+                    region: Option<serde_json::Value>,
+                    format: Option<String>,
+                    quality: Option<u8>,
+                }
+                let so: SSOpts = serde_json::from_value(v)
+                    .map_err(|e| McpError::invalid_params(format!("screenshot_after: {e}"), None))?;
+                let region = match so.region {
+                    None => None,
+                    Some(rv) if rv.as_str().map_or(false, |s| s == "auto") => Some(RegionSpec::Auto),
+                    Some(rv) => {
+                        #[derive(Deserialize)]
+                        struct R { x: i32, y: i32, w: u32, h: u32 }
+                        let r: R = serde_json::from_value(rv)
+                            .map_err(|e| McpError::invalid_params(format!("screenshot_after.region: {e}"), None))?;
+                        Some(RegionSpec::Rect { x: r.x, y: r.y, w: r.w, h: r.h })
+                    }
+                };
+                let format = Some(parse_image_format(so.format.as_deref()));
+                ScreenshotOpts { region, format, quality: so.quality }
+            } else {
+                return Err(McpError::invalid_params(
+                    "screenshot_after: expected true, \"jpeg\", \"png\", or an object".to_string(),
+                    None,
+                ));
+            };
+            Some(opts)
+        }
+    };
+
+    Ok(Some(ActionOpts {
+        wait_for,
+        screenshot_after,
+        verify,
+        wait_timeout_ms: a.wait_timeout_ms,
+    }))
 }
 
 // ---------- input schemas ----------
@@ -98,6 +203,8 @@ pub struct ClickArgs {
     pub modifiers: Vec<String>,
     #[serde(default)]
     pub skip_set_cursor_pos: bool,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 fn left_button() -> String { "left".to_string() }
@@ -107,12 +214,16 @@ fn one_u8() -> u8 { 1 }
 pub struct XYArgs {
     pub x: i32,
     pub y: i32,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ButtonArgs {
     #[serde(default = "left_button")]
     pub button: String,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -125,6 +236,8 @@ pub struct DragArgs {
     pub button: String,
     #[serde(default)]
     pub modifiers: Vec<String>,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -135,11 +248,15 @@ pub struct ScrollArgs {
     pub amount: i32,
     #[serde(default)]
     pub modifiers: Vec<String>,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TypeArgs {
     pub text: String,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -147,6 +264,8 @@ pub struct KeyArgs {
     pub chord: String,
     #[serde(default = "one_u32")]
     pub repeat: u32,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 fn one_u32() -> u32 { 1 }
@@ -155,6 +274,8 @@ fn one_u32() -> u32 { 1 }
 pub struct HoldKeyArgs {
     pub chord: String,
     pub duration_ms: u32,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -175,6 +296,8 @@ fn true_b() -> bool { true }
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct HwndArgs {
     pub hwnd: u64,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -184,6 +307,8 @@ pub struct ResizeMoveArgs {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 // ---------- Phase 3 input schemas ----------
@@ -218,6 +343,8 @@ pub struct SelectorArgs {
     /// Selector JSON: { "ByName": "OK" } / { "ByControlType": "Button" } /
     /// { "And": [...] } etc. -- matches fastuse_proto::Selector serde shape.
     pub selector: serde_json::Value,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -237,12 +364,16 @@ pub struct ClickElementArgs {
     pub selector: serde_json::Value,
     #[serde(default)]
     pub modifiers: Option<Vec<String>>,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TypeIntoElementArgs {
     pub selector: serde_json::Value,
     pub text: String,
+    #[serde(flatten, default)]
+    pub opts: ActionOptsArgs,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -468,7 +599,8 @@ impl Fastuse {
 
     // ---- input ----
     #[tool(name = "click", description = "Click at physical-pixel coordinates with optional modifiers; sets cursor position implicitly unless skip_set_cursor_pos is true.")]
-    async fn click(&self, Parameters(args): Parameters<ClickArgs>) -> Result<Json<AckOutput>, McpError> {
+    async fn click(&self, Parameters(args): Parameters<ClickArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
         let req = Request::Click {
             x: args.x,
             y: args.y,
@@ -476,28 +608,32 @@ impl Fastuse {
             count: args.count,
             modifiers: args.modifiers,
             skip_set_cursor_pos: args.skip_set_cursor_pos,
-            opts: None,
+            opts,
         };
-        ack(self.call(req).await?)
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "mouse_move", description = "Move the system cursor to physical-pixel coordinates. No buttons.")]
-    async fn mouse_move(&self, Parameters(args): Parameters<XYArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseMove { x: args.x, y: args.y, opts: None }).await?)
+    async fn mouse_move(&self, Parameters(args): Parameters<XYArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::MouseMove { x: args.x, y: args.y, opts }).await?)
     }
 
     #[tool(name = "mouse_down", description = "Press a mouse button at the current cursor position.")]
-    async fn mouse_down(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseDown { button: parse_button(&args.button)?, opts: None }).await?)
+    async fn mouse_down(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::MouseDown { button: parse_button(&args.button)?, opts }).await?)
     }
 
     #[tool(name = "mouse_up", description = "Release a mouse button at the current cursor position.")]
-    async fn mouse_up(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseUp { button: parse_button(&args.button)?, opts: None }).await?)
+    async fn mouse_up(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::MouseUp { button: parse_button(&args.button)?, opts }).await?)
     }
 
     #[tool(name = "drag", description = "Click-drag from start to end with optional modifiers held throughout.")]
-    async fn drag(&self, Parameters(args): Parameters<DragArgs>) -> Result<Json<AckOutput>, McpError> {
+    async fn drag(&self, Parameters(args): Parameters<DragArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
         let req = Request::Drag {
             start_x: args.start_x,
             start_y: args.start_y,
@@ -505,42 +641,46 @@ impl Fastuse {
             end_y: args.end_y,
             button: parse_button(&args.button)?,
             modifiers: args.modifiers,
-            opts: None,
+            opts,
         };
-        ack(self.call(req).await?)
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "scroll", description = "Mouse-wheel scroll at the given coordinates. direction = up|down|left|right; amount = wheel notches.")]
-    async fn scroll(&self, Parameters(args): Parameters<ScrollArgs>) -> Result<Json<AckOutput>, McpError> {
+    async fn scroll(&self, Parameters(args): Parameters<ScrollArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
         let req = Request::Scroll {
             x: args.x,
             y: args.y,
             direction: parse_dir(&args.direction)?,
             amount: args.amount,
             modifiers: args.modifiers,
-            opts: None,
+            opts,
         };
-        ack(self.call(req).await?)
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged.")]
-    async fn type_text(&self, Parameters(args): Parameters<TypeArgs>) -> Result<Json<AckOutput>, McpError> {
-        let req = Request::Type { text: Redact::new(args.text), opts: None };
-        ack(self.call(req).await?)
+    async fn type_text(&self, Parameters(args): Parameters<TypeArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        let req = Request::Type { text: Redact::new(args.text), opts };
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "key", description = "Press a chord like ctrl+s, alt+f4, win+d. repeat defaults to 1.")]
-    async fn key(&self, Parameters(args): Parameters<KeyArgs>) -> Result<Json<AckOutput>, McpError> {
+    async fn key(&self, Parameters(args): Parameters<KeyArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let _ = fastuse_proto::parse_chord(&args.chord)
             .map_err(|e| McpError::invalid_params(format!("invalid chord {:?}: {e}", args.chord), None))?;
-        ack(self.call(Request::Key { chord: args.chord, repeat: args.repeat, opts: None }).await?)
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::Key { chord: args.chord, repeat: args.repeat, opts }).await?)
     }
 
     #[tool(name = "hold_key", description = "Press a chord, hold for duration_ms, release. Modifiers and primary key are flushed on panic / disconnect.")]
-    async fn hold_key(&self, Parameters(args): Parameters<HoldKeyArgs>) -> Result<Json<AckOutput>, McpError> {
+    async fn hold_key(&self, Parameters(args): Parameters<HoldKeyArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let _ = fastuse_proto::parse_chord(&args.chord)
             .map_err(|e| McpError::invalid_params(format!("invalid chord {:?}: {e}", args.chord), None))?;
-        ack(self.call(Request::HoldKey { chord: args.chord, duration_ms: args.duration_ms, opts: None }).await?)
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::HoldKey { chord: args.chord, duration_ms: args.duration_ms, opts }).await?)
     }
 
     #[tool(name = "wait", description = "Server-side sleep. Returns slept_us. Does not occupy the input thread.")]
@@ -591,14 +731,16 @@ impl Fastuse {
     }
 
     #[tool(name = "focus_window", description = "Bring an HWND to the foreground using AttachThreadInput to bypass the SetForegroundWindow lockout.")]
-    async fn focus_window(&self, Parameters(args): Parameters<HwndArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::FocusWindow { hwnd: args.hwnd, opts: None }).await?)
+    async fn focus_window(&self, Parameters(args): Parameters<HwndArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        action_or_ack_response(self.call(Request::FocusWindow { hwnd: args.hwnd, opts }).await?)
     }
 
     #[tool(name = "resize_move_window", description = "Move + resize an HWND in physical-pixel virtual-desktop space. Validates that the centre lies on a known monitor.")]
-    async fn resize_move_window(&self, Parameters(args): Parameters<ResizeMoveArgs>) -> Result<Json<AckOutput>, McpError> {
-        let req = Request::ResizeMoveWindow { hwnd: args.hwnd, x: args.x, y: args.y, w: args.w, h: args.h, opts: None };
-        ack(self.call(req).await?)
+    async fn resize_move_window(&self, Parameters(args): Parameters<ResizeMoveArgs>) -> Result<Json<ActionOrAck>, McpError> {
+        let opts = build_action_opts(args.opts)?;
+        let req = Request::ResizeMoveWindow { hwnd: args.hwnd, x: args.x, y: args.y, w: args.w, h: args.h, opts };
+        action_or_ack_response(self.call(req).await?)
     }
 
     // ---- Phase 3: capture ----
@@ -664,17 +806,19 @@ impl Fastuse {
     }
 
     #[tool(name = "click_element", description = "Find an element via selector and click its centroid. Delegates to phase2 click after centroid resolution.")]
-    async fn click_element(&self, Parameters(args): Parameters<ClickElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+    async fn click_element(&self, Parameters(args): Parameters<ClickElementArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::ClickElement { selector, modifiers: args.modifiers, opts: None };
-        element_response(self.call(req).await?)
+        let opts = build_action_opts(args.opts)?;
+        let req = Request::ClickElement { selector, modifiers: args.modifiers, opts };
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "type_into_element", description = "Find an element via selector, focus it, type text. Payload is redacted from logs.")]
-    async fn type_into_element(&self, Parameters(args): Parameters<TypeIntoElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+    async fn type_into_element(&self, Parameters(args): Parameters<TypeIntoElementArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text), opts: None };
-        element_response(self.call(req).await?)
+        let opts = build_action_opts(args.opts)?;
+        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text), opts };
+        action_or_ack_response(self.call(req).await?)
     }
 
     #[tool(name = "wait_for_element", description = "Poll for an element until it appears or timeout (default 5000ms). Returns matched=true/false.")]
@@ -685,10 +829,11 @@ impl Fastuse {
     }
 
     #[tool(name = "scroll_into_view", description = "Scroll the matched element into view via UIA ScrollItemPattern.")]
-    async fn scroll_into_view(&self, Parameters(args): Parameters<SelectorArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+    async fn scroll_into_view(&self, Parameters(args): Parameters<SelectorArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::ScrollIntoView { selector, opts: None };
-        element_response(self.call(req).await?)
+        let opts = build_action_opts(args.opts)?;
+        let req = Request::ScrollIntoView { selector, opts };
+        action_or_ack_response(self.call(req).await?)
     }
 
     // ---- Phase 4: clipboard ----
@@ -854,6 +999,28 @@ impl Fastuse {
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }
+    }
+}
+
+fn action_or_ack_response(res: Response) -> Result<Json<ActionOrAck>, McpError> {
+    use base64::Engine;
+    match res {
+        Response::Ack { slept_us } => Ok(Json(ActionOrAck::Ack(AckOutput { ok: true, slept_us }))),
+        Response::Element { matched } => Ok(Json(ActionOrAck::Element(ElementMatchOutput { matched }))),
+        Response::ActionResult { ok, wait_matched, waited_ms, screenshot } => {
+            let screenshot = screenshot.map(|s| {
+                let s = *s;
+                ScreenshotOutput {
+                    mime: s.mime,
+                    width: s.width,
+                    height: s.height,
+                    data_b64: base64::engine::general_purpose::STANDARD.encode(s.bytes.into_inner()),
+                }
+            });
+            Ok(Json(ActionOrAck::Result(ActionResultOutput { ok, wait_matched, waited_ms: Some(waited_ms), screenshot })))
+        }
+        Response::Error(e) => Err(Fastuse::err_from_proto(e)),
+        other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
     }
 }
 
