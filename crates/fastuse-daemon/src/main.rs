@@ -12,6 +12,7 @@
 
 mod dispatch;
 mod idle;
+mod sd;
 mod sentinel;
 mod server;
 mod singleton;
@@ -22,8 +23,19 @@ use fastuse_win::{increment_mta_once, set_per_monitor_v2_first_call};
 
 use crate::singleton::{acquire_singleton, AcquireOutcome};
 
+use clap::Parser;
+
+#[derive(Debug, Parser)]
+#[command(name = "fastuse-daemon", version)]
+struct Args {
+    /// Idle timeout in seconds (0 disables; default 300 = 5 min).
+    #[arg(long, default_value_t = 300)]
+    idle_timeout: u64,
+}
+
 fn main() {
     set_per_monitor_v2_first_call();
+    let args = Args::parse();
 
     // Tracing — keep guard alive for the rest of main.
     let _trace_guard = match tracing_init::init() {
@@ -108,7 +120,15 @@ fn main() {
     };
 
     let server_result = rt.block_on(async {
-        server::serve(identity.path.clone(), input.as_ref(), uia.as_ref(), capture.as_ref()).await
+        server::serve(
+            identity.path.clone(),
+            input.as_ref(),
+            uia.as_ref(),
+            capture.as_ref(),
+            args.idle_timeout,
+            identity.session_id,
+        )
+        .await
     });
 
     if let Err(e) = server_result {
