@@ -16,19 +16,22 @@ use windows::Win32::System::Threading::{
 /// Try to connect to `pipe_path`. If the pipe doesn't exist, spawn
 /// `fastuse-daemon.exe` (located beside the current binary or via PATH) and
 /// retry with backoff: 50ms -> 100ms -> 200ms -> 400ms -> 800ms (cap 2s).
+///
+/// Self-healing: if the backoff exhausts and the sentinel points at a live
+/// process that's holding the singleton mutex but never opened the pipe (zombie
+/// from a pre-fix binary, or a hung startup), force-kill the holder, clear the
+/// sentinel, and retry once. The next CLI call always recovers automatically.
 pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClient> {
     // Fast path: try connecting once.
     if let Ok(c) = ClientOptions::new().open(pipe_path) {
         return Ok(c);
     }
-    // Spawn the daemon.
-    spawn_daemon_detached()?;
-
-    // Backoff retry.
-    let backoffs = [50u64, 100, 200, 400, 800, 800];
-    for ms in backoffs {
-        sleep(Duration::from_millis(ms)).await;
-        if let Ok(c) = ClientOptions::new().open(pipe_path) {
+    if let Some(c) = try_spawn_and_connect(pipe_path).await {
+        return Ok(c);
+    }
+    // First spawn round failed. Suspect a zombie holding the singleton mutex.
+    if evict_stale_daemon() {
+        if let Some(c) = try_spawn_and_connect(pipe_path).await {
             return Ok(c);
         }
     }
@@ -41,6 +44,74 @@ pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClien
         format!("daemon pipe {pipe_path} did not appear after auto-spawn backoff"),
     );
     Err(std::io::Error::new(std::io::ErrorKind::TimedOut, err))
+}
+
+async fn try_spawn_and_connect(pipe_path: &str) -> Option<NamedPipeClient> {
+    if spawn_daemon_detached().is_err() {
+        return None;
+    }
+    for ms in [50u64, 100, 200, 400, 800, 800] {
+        sleep(Duration::from_millis(ms)).await;
+        if let Ok(c) = ClientOptions::new().open(pipe_path) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Read the sentinel, force-kill the recorded PID if alive, remove the file.
+/// Returns `true` if a stale holder was evicted (caller can retry spawn).
+fn evict_stale_daemon() -> bool {
+    let Some(path) = local_app_data_join("daemon.pid") else { return false };
+    let Ok(contents) = std::fs::read_to_string(&path) else { return false };
+    let pid = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("pid=").and_then(|s| s.trim().parse::<u32>().ok()));
+    let _ = std::fs::remove_file(&path);
+    let Some(pid) = pid else { return false };
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    // Hard guard: only kill if the live process at this PID is actually
+    // fastuse-daemon.exe. Protects against a corrupted or malicious sentinel
+    // pointing at an unrelated PID.
+    if !pid_is_fastuse_daemon(pid) {
+        return false;
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    true
+}
+
+fn pid_is_fastuse_daemon(pid: u32) -> bool {
+    // `tasklist /FI "PID eq N" /FO CSV /NH` prints one CSV row when the PID
+    // exists, else `INFO: No tasks are running...` to stdout. We just need
+    // the first comma-quoted field to start with `fastuse-daemon`.
+    let out = std::process::Command::new("tasklist")
+        .args([
+            "/FI",
+            &format!("PID eq {pid}"),
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else { return false };
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.lines()
+        .next()
+        .and_then(|l| l.strip_prefix('"'))
+        .map(|l| l.starts_with("fastuse-daemon"))
+        .unwrap_or(false)
+}
+
+fn local_app_data_join(name: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(base).join("fastuse").join(name))
 }
 
 fn locate_daemon() -> std::io::Result<PathBuf> {
