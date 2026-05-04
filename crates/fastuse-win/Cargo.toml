@@ -1,0 +1,25 @@
+[package]
+name = "fastuse-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastuse-proto = { path = "../fastuse-proto" }
+fastuse-core = { path = "../fastuse-core" }
+once_cell = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = { workspace = true }
+uiautomation = { workspace = true }

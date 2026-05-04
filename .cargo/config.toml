@@ -1,0 +1,5 @@
+# D-13: +crt-static is non-negotiable for single-binary distribution.
+# /INCREMENTAL:NO disables incremental linking for release.
+# Target CPU left at default x86-64 baseline (NO AVX2) for Win10/11 universality.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/INCREMENTAL:NO"]
