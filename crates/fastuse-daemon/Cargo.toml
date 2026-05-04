@@ -40,5 +40,11 @@ windows = { workspace = true, features = [
     "Win32_System_RemoteDesktop",
 ] }
 
+[dev-dependencies]
+fastuse-proto = { path = "../fastuse-proto" }
+fastuse-core = { path = "../fastuse-core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }
+serde_json = { workspace = true }
+
 [build-dependencies]
 embed-resource = { workspace = true }
