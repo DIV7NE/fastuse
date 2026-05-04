@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fastuse_proto::{coords::Rect, Error as ProtoError, ErrorCode};
 use windows::core::Interface;
-use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
 };
@@ -461,7 +461,31 @@ fn acquire_and_copy(
     // Determine output dimensions — full monitor or cropped.
     let mon_w = (mon.desc.DesktopCoordinates.right - mon.desc.DesktopCoordinates.left).max(1) as u32;
     let mon_h = (mon.desc.DesktopCoordinates.bottom - mon.desc.DesktopCoordinates.top).max(1) as u32;
-    let (off_x, off_y, out_w, out_h) = clamp_region(region, mon_w, mon_h);
+    // Region coords arrive in virtual-desktop space (per Request docs in
+    // wire.rs:181-183). Convert to monitor-local space by subtracting the
+    // monitor's DesktopCoordinates origin BEFORE clamping. Without this,
+    // a region targeting a secondary monitor at virtual-desktop x=2000
+    // (whose DesktopCoordinates.left=1920) would clamp to x=0 and return
+    // a stripe of the wrong area. (CR-01)
+    let origin_x = mon.desc.DesktopCoordinates.left;
+    let origin_y = mon.desc.DesktopCoordinates.top;
+    let local_region = region.map(|r| Rect {
+        x: r.x - origin_x,
+        y: r.y - origin_y,
+        w: r.w,
+        h: r.h,
+    });
+    let (off_x, off_y, out_w, out_h) = clamp_region(local_region, mon_w, mon_h);
+
+    // WR-06: Defensive null check on mapped.pData. Microsoft docs guarantee
+    // non-null on S_OK but a misbehaving driver could return null.
+    if mapped.pData.is_null() {
+        unsafe { state.context.Unmap(&staging_resource, 0) };
+        return Err(ProtoError::new(
+            ErrorCode::Internal,
+            "Map returned null pData".to_string(),
+        ));
+    }
 
     // Copy out, handling row-pitch padding.
     let row_bytes_out = (out_w as usize) * 4;
@@ -512,10 +536,6 @@ pub fn force_lose_for_test(monitor: u32) {
     });
 }
 
-// Mark the unused-field warning suppressed for `_frame_guard` and `_`.
-#[allow(dead_code)]
-fn _suppress_unused(_: RECT) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,5 +569,25 @@ mod tests {
             clamp_region(Some(Rect { x: -10, y: -10, w: 100, h: 50 }), 1920, 1080),
             (0, 0, 100, 50)
         );
+    }
+
+    #[test]
+    fn region_virtual_desktop_to_monitor_local_offset() {
+        // CR-01 regression: secondary monitor at virtual-desktop x=1920.
+        // Caller asks for region (x=2000, y=100, w=300, h=200) — i.e. the
+        // 80-pixel-offset region on the secondary monitor.
+        // After offset subtraction this should be (80, 100, 300, 200).
+        let origin_x: i32 = 1920;
+        let origin_y: i32 = 0;
+        let req = Rect { x: 2000, y: 100, w: 300, h: 200 };
+        let local = Rect {
+            x: req.x - origin_x,
+            y: req.y - origin_y,
+            w: req.w,
+            h: req.h,
+        };
+        // Secondary monitor is 1920x1080.
+        let clamped = clamp_region(Some(local), 1920, 1080);
+        assert_eq!(clamped, (80, 100, 300, 200));
     }
 }
