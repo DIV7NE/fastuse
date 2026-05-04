@@ -41,14 +41,19 @@ impl ErrorCode {
     }
 }
 
+/// Structured error carried over the wire (D-18).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Error {
+    /// Stable machine-readable error vocabulary.
     pub code: ErrorCode,
+    /// Human-readable explanation of the failure.
     pub message: String,
+    /// Optional hint suggesting next steps for the operator.
     pub hint: Option<String>,
 }
 
 impl Error {
+    /// Construct a new `Error` with no hint.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -57,6 +62,7 @@ impl Error {
         }
     }
 
+    /// Attach a hint for operator follow-up.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self

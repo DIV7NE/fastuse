@@ -20,12 +20,18 @@ pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 pub enum Request {
     /// First-connect handshake (D-22).
     Hello {
+        /// Short identifier of the connecting client (e.g. "cli", "mcp").
         client_kind: String,
+        /// Semver-style version of the connecting client binary.
         client_version: String,
+        /// Optional override for the daemon's idle-timeout (most-permissive wins).
         requested_idle_timeout_secs: Option<u32>,
     },
     /// Liveness probe; `ts_us` is the client's wall-clock send time in micros.
-    Ping { ts_us: u64 },
+    Ping {
+        /// Client send timestamp (microseconds since UNIX epoch).
+        ts_us: u64,
+    },
     /// Cooperative shutdown (used by `fastuse-cli stop`, D-04).
     Shutdown,
 }
@@ -35,13 +41,18 @@ pub enum Request {
 pub enum Response {
     /// Handshake reply (D-22).
     Welcome {
+        /// Semver-style version of the daemon binary.
         daemon_version: String,
+        /// Idle timeout (seconds) the daemon committed to for this session.
         current_idle_timeout_secs: u32,
     },
     /// Ping reply.
     Pong {
+        /// Echo of the client's send timestamp in microseconds.
         ts_us: u64,
+        /// OS-level process id of the responding daemon.
         daemon_pid: u32,
+        /// WTS console session id the daemon belongs to.
         session_id: u32,
     },
     /// Structured error.
@@ -89,14 +100,19 @@ pub fn decode_frame<T: DeserializeOwned, R: Read>(r: &mut R) -> Result<T, FrameE
     postcard::from_bytes(&buf).map_err(FrameError::Deserialize)
 }
 
+/// Error returned by [`encode_frame`] / [`decode_frame`] / [`write_frame`].
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
+    /// Underlying byte stream I/O failure.
     #[error("io: {0}")]
     Io(#[source] io::Error),
+    /// Postcard serialization failure on the encode path.
     #[error("serialize: {0}")]
     Serialize(#[source] postcard::Error),
+    /// Postcard deserialization failure on the decode path.
     #[error("deserialize: {0}")]
     Deserialize(#[source] postcard::Error),
+    /// Frame payload exceeds [`MAX_FRAME_BYTES`].
     #[error("frame too large: {0} bytes (cap is {})", MAX_FRAME_BYTES)]
     TooLarge(usize),
 }

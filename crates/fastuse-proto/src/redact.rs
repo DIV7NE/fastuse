@@ -19,14 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct Redact<T>(T);
 
 impl<T> Redact<T> {
+    /// Wrap a value so that `Display`/`Debug` never expose its bytes.
     pub const fn new(inner: T) -> Self {
         Self(inner)
     }
 
+    /// Consume the wrapper and yield the inner value (audit-greppable).
     pub fn into_inner(self) -> T {
         self.0
     }
 
+    /// Borrow the inner value (audit-greppable).
     pub fn as_inner(&self) -> &T {
         &self.0
     }
@@ -47,6 +50,7 @@ impl<T: RedactLen> fmt::Debug for Redact<T> {
 
 /// Length helper. Implemented for the small set of payload types we wrap.
 pub trait RedactLen {
+    /// Number of bytes the payload represents (used in the redacted display).
     fn redact_len(&self) -> usize;
 }
 
@@ -80,7 +84,10 @@ mod tests {
 
     #[test]
     fn redact_display_hides_payload() {
-        let payload = vec![0xDE, 0xAD, 0xBE, 0xEF; 25].concat(); // 100 bytes
+        let payload: Vec<u8> = std::iter::repeat([0xDE_u8, 0xAD, 0xBE, 0xEF])
+            .take(25)
+            .flatten()
+            .collect(); // 100 bytes
         let r = Redact::new(payload);
         let s = format!("{r}");
         assert_eq!(s, "<redacted 100 bytes>");
