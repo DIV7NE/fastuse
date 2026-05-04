@@ -199,7 +199,7 @@ pub async fn click_element(
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
     });
-    let req = Request::ClickElement { selector, modifiers };
+    let req = Request::ClickElement { selector, modifiers, opts: None };
     print_match(one_call(pipe_path, req).await?)
 }
 
@@ -212,6 +212,7 @@ pub async fn type_into_element(
     let req = Request::TypeIntoElement {
         selector,
         text: Redact::new(text),
+        opts: None,
     };
     print_match(one_call(pipe_path, req).await?)
 }
@@ -231,7 +232,7 @@ pub async fn wait_for_element(
 
 pub async fn scroll_into_view(pipe_path: &str, selector_json: &str) -> anyhow::Result<()> {
     let selector = parse_selector(selector_json)?;
-    let req = Request::ScrollIntoView { selector };
+    let req = Request::ScrollIntoView { selector, opts: None };
     print_match(one_call(pipe_path, req).await?)
 }
 

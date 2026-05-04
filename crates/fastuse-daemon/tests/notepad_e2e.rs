@@ -80,13 +80,13 @@ async fn notepad_e2e_unicode_save_close() {
         }};
     }
 
-    let _ = send!(Request::FocusWindow { hwnd }, true);
+    let _ = send!(Request::FocusWindow { hwnd, opts: None }, true);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = send!(
-        Request::Type { text: Redact::new("Hello, fastuse 🎉".into()) },
+        Request::Type { text: Redact::new("Hello, fastuse 🎉".into()), opts: None },
         true
     );
-    let _ = send!(Request::Key { chord: "ctrl+s".into(), repeat: 1 }, true);
+    let _ = send!(Request::Key { chord: "ctrl+s".into(), repeat: 1, opts: None }, true);
 
     // 4. Save dialog. Notepad on Win11 may show a different filename UI;
     //    we issue a best-effort sequence. Don't fail the test if the save
@@ -98,14 +98,15 @@ async fn notepad_e2e_unicode_save_close() {
                 "{}\\fastuse_e2e_test.txt",
                 std::env::temp_dir().display()
             )),
+            opts: None,
         },
         true
     );
-    let _ = send!(Request::Key { chord: "enter".into(), repeat: 1 }, true);
+    let _ = send!(Request::Key { chord: "enter".into(), repeat: 1, opts: None }, true);
     let _ = send!(Request::Wait { duration_ms: 250 }, false);
 
     // 5. alt+f4; dismiss save prompt if it lingers.
-    let _ = send!(Request::Key { chord: "alt+f4".into(), repeat: 1 }, true);
+    let _ = send!(Request::Key { chord: "alt+f4".into(), repeat: 1, opts: None }, true);
 
     // Latency: assert p50 < 50ms across non-Wait calls.
     // WR-02 belt-and-braces: explicit message instead of an opaque

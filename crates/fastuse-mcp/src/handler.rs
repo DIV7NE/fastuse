@@ -468,23 +468,24 @@ impl Fastuse {
             count: args.count,
             modifiers: args.modifiers,
             skip_set_cursor_pos: args.skip_set_cursor_pos,
+            opts: None,
         };
         ack(self.call(req).await?)
     }
 
     #[tool(name = "mouse_move", description = "Move the system cursor to physical-pixel coordinates. No buttons.")]
     async fn mouse_move(&self, Parameters(args): Parameters<XYArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseMove { x: args.x, y: args.y }).await?)
+        ack(self.call(Request::MouseMove { x: args.x, y: args.y, opts: None }).await?)
     }
 
     #[tool(name = "mouse_down", description = "Press a mouse button at the current cursor position.")]
     async fn mouse_down(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseDown { button: parse_button(&args.button)? }).await?)
+        ack(self.call(Request::MouseDown { button: parse_button(&args.button)?, opts: None }).await?)
     }
 
     #[tool(name = "mouse_up", description = "Release a mouse button at the current cursor position.")]
     async fn mouse_up(&self, Parameters(args): Parameters<ButtonArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::MouseUp { button: parse_button(&args.button)? }).await?)
+        ack(self.call(Request::MouseUp { button: parse_button(&args.button)?, opts: None }).await?)
     }
 
     #[tool(name = "drag", description = "Click-drag from start to end with optional modifiers held throughout.")]
@@ -496,6 +497,7 @@ impl Fastuse {
             end_y: args.end_y,
             button: parse_button(&args.button)?,
             modifiers: args.modifiers,
+            opts: None,
         };
         ack(self.call(req).await?)
     }
@@ -508,13 +510,14 @@ impl Fastuse {
             direction: parse_dir(&args.direction)?,
             amount: args.amount,
             modifiers: args.modifiers,
+            opts: None,
         };
         ack(self.call(req).await?)
     }
 
     #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged.")]
     async fn type_text(&self, Parameters(args): Parameters<TypeArgs>) -> Result<Json<AckOutput>, McpError> {
-        let req = Request::Type { text: Redact::new(args.text) };
+        let req = Request::Type { text: Redact::new(args.text), opts: None };
         ack(self.call(req).await?)
     }
 
@@ -522,14 +525,14 @@ impl Fastuse {
     async fn key(&self, Parameters(args): Parameters<KeyArgs>) -> Result<Json<AckOutput>, McpError> {
         let _ = fastuse_proto::parse_chord(&args.chord)
             .map_err(|e| McpError::invalid_params(format!("invalid chord {:?}: {e}", args.chord), None))?;
-        ack(self.call(Request::Key { chord: args.chord, repeat: args.repeat }).await?)
+        ack(self.call(Request::Key { chord: args.chord, repeat: args.repeat, opts: None }).await?)
     }
 
     #[tool(name = "hold_key", description = "Press a chord, hold for duration_ms, release. Modifiers and primary key are flushed on panic / disconnect.")]
     async fn hold_key(&self, Parameters(args): Parameters<HoldKeyArgs>) -> Result<Json<AckOutput>, McpError> {
         let _ = fastuse_proto::parse_chord(&args.chord)
             .map_err(|e| McpError::invalid_params(format!("invalid chord {:?}: {e}", args.chord), None))?;
-        ack(self.call(Request::HoldKey { chord: args.chord, duration_ms: args.duration_ms }).await?)
+        ack(self.call(Request::HoldKey { chord: args.chord, duration_ms: args.duration_ms, opts: None }).await?)
     }
 
     #[tool(name = "wait", description = "Server-side sleep. Returns slept_us. Does not occupy the input thread.")]
@@ -581,12 +584,12 @@ impl Fastuse {
 
     #[tool(name = "focus_window", description = "Bring an HWND to the foreground using AttachThreadInput to bypass the SetForegroundWindow lockout.")]
     async fn focus_window(&self, Parameters(args): Parameters<HwndArgs>) -> Result<Json<AckOutput>, McpError> {
-        ack(self.call(Request::FocusWindow { hwnd: args.hwnd }).await?)
+        ack(self.call(Request::FocusWindow { hwnd: args.hwnd, opts: None }).await?)
     }
 
     #[tool(name = "resize_move_window", description = "Move + resize an HWND in physical-pixel virtual-desktop space. Validates that the centre lies on a known monitor.")]
     async fn resize_move_window(&self, Parameters(args): Parameters<ResizeMoveArgs>) -> Result<Json<AckOutput>, McpError> {
-        let req = Request::ResizeMoveWindow { hwnd: args.hwnd, x: args.x, y: args.y, w: args.w, h: args.h };
+        let req = Request::ResizeMoveWindow { hwnd: args.hwnd, x: args.x, y: args.y, w: args.w, h: args.h, opts: None };
         ack(self.call(req).await?)
     }
 
@@ -655,14 +658,14 @@ impl Fastuse {
     #[tool(name = "click_element", description = "Find an element via selector and click its centroid. Delegates to phase2 click after centroid resolution.")]
     async fn click_element(&self, Parameters(args): Parameters<ClickElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::ClickElement { selector, modifiers: args.modifiers };
+        let req = Request::ClickElement { selector, modifiers: args.modifiers, opts: None };
         element_response(self.call(req).await?)
     }
 
     #[tool(name = "type_into_element", description = "Find an element via selector, focus it, type text. Payload is redacted from logs.")]
     async fn type_into_element(&self, Parameters(args): Parameters<TypeIntoElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text) };
+        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text), opts: None };
         element_response(self.call(req).await?)
     }
 
@@ -676,7 +679,7 @@ impl Fastuse {
     #[tool(name = "scroll_into_view", description = "Scroll the matched element into view via UIA ScrollItemPattern.")]
     async fn scroll_into_view(&self, Parameters(args): Parameters<SelectorArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
         let selector = parse_selector(args.selector)?;
-        let req = Request::ScrollIntoView { selector };
+        let req = Request::ScrollIntoView { selector, opts: None };
         element_response(self.call(req).await?)
     }
 
@@ -698,7 +701,7 @@ impl Fastuse {
 
     #[tool(name = "clipboard_set_text", description = "Write text to the clipboard. Payload is wrapped in Redact<> end-to-end.")]
     async fn clipboard_set_text(&self, Parameters(args): Parameters<ClipboardSetTextArgs>) -> Result<Json<AckOutput>, McpError> {
-        let req = Request::ClipboardSet(fastuse_proto::ClipboardSet::Text(Redact::new(args.text)));
+        let req = Request::ClipboardSet { req: fastuse_proto::ClipboardSet::Text(Redact::new(args.text)), opts: None };
         match self.call(req).await? {
             Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
@@ -734,12 +737,15 @@ impl Fastuse {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&args.data_b64)
             .map_err(|e| McpError::invalid_params(format!("data_b64: {e}"), None))?;
-        let req = Request::ClipboardSet(fastuse_proto::ClipboardSet::Image {
-            mime: args.mime,
-            bytes: Redact::new(bytes),
-            w: args.width,
-            h: args.height,
-        });
+        let req = Request::ClipboardSet {
+            req: fastuse_proto::ClipboardSet::Image {
+                mime: args.mime,
+                bytes: Redact::new(bytes),
+                w: args.width,
+                h: args.height,
+            },
+            opts: None,
+        };
         match self.call(req).await? {
             Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
@@ -779,7 +785,7 @@ impl Fastuse {
     // ---- Phase 4: launch / process ----
     #[tool(name = "launch_app", description = "Launch an application by PATH binary, absolute path, or known URI scheme. Returns spawned PID and main HWND if visible within 3s.")]
     async fn launch_app(&self, Parameters(args): Parameters<LaunchAppArgs>) -> Result<Json<LaunchAppOutput>, McpError> {
-        let req = Request::LaunchApp(fastuse_proto::LaunchApp { query: args.query });
+        let req = Request::LaunchApp { req: fastuse_proto::LaunchApp { query: args.query }, opts: None };
         match self.call(req).await? {
             Response::LaunchApp(r) => Ok(Json(LaunchAppOutput {
                 pid: r.pid,

@@ -53,6 +53,7 @@ async fn multi_monitor_cursor_roundtrip() {
         .call(Request::MouseMove {
             x: target_x,
             y: target_y,
+            opts: None,
         })
         .await
         .expect("mouse_move");

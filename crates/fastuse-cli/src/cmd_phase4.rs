@@ -67,7 +67,7 @@ pub async fn clipboard_get_text(pipe_path: &str) -> anyhow::Result<()> {
 }
 
 pub async fn clipboard_set_text(pipe_path: &str, text: String) -> anyhow::Result<()> {
-    let req = Request::ClipboardSet(ClipboardSet::Text(Redact::new(text)));
+    let req = Request::ClipboardSet { req: ClipboardSet::Text(Redact::new(text)), opts: None };
     match one_call(pipe_path, req).await? {
         Response::ClipboardSet => {
             println!("{}", json!({"ok": true}));
@@ -115,7 +115,7 @@ pub async fn shell_exec(
 }
 
 pub async fn launch_app(pipe_path: &str, query: String) -> anyhow::Result<()> {
-    let req = Request::LaunchApp(LaunchApp { query });
+    let req = Request::LaunchApp { req: LaunchApp { query }, opts: None };
     match one_call(pipe_path, req).await? {
         Response::LaunchApp(r) => {
             println!(

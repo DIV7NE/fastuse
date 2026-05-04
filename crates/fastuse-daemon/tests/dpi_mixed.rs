@@ -83,11 +83,12 @@ async fn dpi_mixed_resize_round_trip() {
             y: ay,
             w: 800,
             h: 600,
+            opts: None,
         })
         .await
         .expect("resize_move A");
     tokio::time::sleep(Duration::from_millis(80)).await;
-    let _ = client.call(Request::FocusWindow { hwnd }).await.expect("focus A");
+    let _ = client.call(Request::FocusWindow { hwnd, opts: None }).await.expect("focus A");
     let info_a = read_foreground(&mut client).await;
     eprintln!("after move to A: bounds={:?}", info_a.bounds);
     assert!(near(info_a.bounds.x, ax, 8), "A.x off: {} vs {}", info_a.bounds.x, ax);
@@ -102,11 +103,12 @@ async fn dpi_mixed_resize_round_trip() {
             y: by,
             w: 800,
             h: 600,
+            opts: None,
         })
         .await
         .expect("resize_move B");
     tokio::time::sleep(Duration::from_millis(80)).await;
-    let _ = client.call(Request::FocusWindow { hwnd }).await.expect("focus B");
+    let _ = client.call(Request::FocusWindow { hwnd, opts: None }).await.expect("focus B");
     let info_b = read_foreground(&mut client).await;
     eprintln!("after move to B: bounds={:?}", info_b.bounds);
     assert!(near(info_b.bounds.x, bx, 8), "B.x off: {} vs {}", info_b.bounds.x, bx);

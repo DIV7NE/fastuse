@@ -115,12 +115,13 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             count,
             modifiers,
             skip_set_cursor_pos,
+            opts: _,
         } => run_unit(ctx, &mut win32_us, move || {
             ih::click(x, y, button, count, &modifiers, skip_set_cursor_pos)
         }),
-        Request::MouseMove { x, y } => run_unit(ctx, &mut win32_us, move || ih::mouse_move(x, y)),
-        Request::MouseDown { button } => run_unit(ctx, &mut win32_us, move || ih::mouse_down(button)),
-        Request::MouseUp { button } => run_unit(ctx, &mut win32_us, move || ih::mouse_up(button)),
+        Request::MouseMove { x, y, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_move(x, y)),
+        Request::MouseDown { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_down(button)),
+        Request::MouseUp { button, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::mouse_up(button)),
         Request::Drag {
             start_x,
             start_y,
@@ -128,6 +129,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             end_y,
             button,
             modifiers,
+            opts: _,
         } => run_unit(ctx, &mut win32_us, move || {
             ih::drag(start_x, start_y, end_x, end_y, button, &modifiers)
         }),
@@ -137,17 +139,18 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             direction,
             amount,
             modifiers,
+            opts: _,
         } => run_unit(ctx, &mut win32_us, move || {
             ih::scroll(x, y, direction, amount, &modifiers)
         }),
-        Request::Type { text } => {
+        Request::Type { text, opts: _ } => {
             // Expose the redacted payload only inside this scope; never log it.
             let payload = text.into_inner();
             tracing::debug!(text_len = payload.len(), "type tool dispatch");
             run_unit(ctx, &mut win32_us, move || ih::type_text(&payload))
         }
-        Request::Key { chord, repeat } => run_unit(ctx, &mut win32_us, move || ih::key(&chord, repeat)),
-        Request::HoldKey { chord, duration_ms } => run_unit(ctx, &mut win32_us, move || ih::hold_key(&chord, duration_ms)),
+        Request::Key { chord, repeat, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::key(&chord, repeat)),
+        Request::HoldKey { chord, duration_ms, opts: _ } => run_unit(ctx, &mut win32_us, move || ih::hold_key(&chord, duration_ms)),
         Request::Wait { duration_ms } => {
             // Handled directly on the dispatch thread (NOT the input thread)
             // so concurrent input calls aren't blocked by sleeps.
@@ -174,8 +177,8 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             list_windows(process_name.as_deref(), title_substring.as_deref(), visible_only)
         })
         .map_or_else(Response::Error, Response::Windows),
-        Request::FocusWindow { hwnd } => run_unit(ctx, &mut win32_us, move || focus_window(hwnd)),
-        Request::ResizeMoveWindow { hwnd, x, y, w, h } => {
+        Request::FocusWindow { hwnd, opts: _ } => run_unit(ctx, &mut win32_us, move || focus_window(hwnd)),
+        Request::ResizeMoveWindow { hwnd, x, y, w, h, opts: _ } => {
             run_unit(ctx, &mut win32_us, move || resize_move_window(hwnd, x, y, w, h))
         }
 
@@ -197,7 +200,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             .await
             .into_response_or_err(&mut win32_us)
         }
-        Request::ClipboardSet(s) => {
+        Request::ClipboardSet { req: s, opts: _ } => {
             let tool = match &s {
                 ClipboardSet::Text(_) => "clipboard_set_text",
                 ClipboardSet::Image { .. } => "clipboard_set_image",
@@ -229,7 +232,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 }
             }
         }
-        Request::LaunchApp(la) => {
+        Request::LaunchApp { req: la, opts: _ } => {
             let target = la.query.clone();
             gate_then("launch_app", Some(&target), ctx, move |_| {
                 let w = Instant::now();
@@ -343,7 +346,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
-        Request::ClickElement { selector, modifiers } => {
+        Request::ClickElement { selector, modifiers, opts: _ } => {
             match (ctx.uia.as_ref(), ctx.input.as_ref()) {
                 (Some(uia), Some(input)) => {
                     let w_start = Instant::now();
@@ -357,7 +360,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 )),
             }
         }
-        Request::TypeIntoElement { selector, text } => {
+        Request::TypeIntoElement { selector, text, opts: _ } => {
             match (ctx.uia.as_ref(), ctx.input.as_ref()) {
                 (Some(uia), Some(input)) => {
                     let w_start = Instant::now();
@@ -383,7 +386,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
-        Request::ScrollIntoView { selector } => match ctx.uia.as_ref() {
+        Request::ScrollIntoView { selector, opts: _ } => match ctx.uia.as_ref() {
             None => Response::Error(Error::new(
                 ErrorCode::Internal,
                 "uia pool unavailable".to_string(),
@@ -609,9 +612,10 @@ mod tests {
     async fn launch_authy_blocked() {
         let ctx = ctx_with(vec!["launch_app".into()]);
         let r = handle(
-            Request::LaunchApp(fastuse_proto::LaunchApp {
-                query: "Authy".into(),
-            }),
+            Request::LaunchApp {
+                req: fastuse_proto::LaunchApp { query: "Authy".into() },
+                opts: None,
+            },
             &ctx,
         )
         .await;

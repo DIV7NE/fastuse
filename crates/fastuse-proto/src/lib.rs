@@ -30,8 +30,9 @@ pub use redact::{Redact, RedactLen};
 pub use selector::Selector;
 pub use uia_node::{ControlType, ImageFormat, TreeView, UIANode};
 pub use wire::{
-    decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, ClipFormat,
-    ClipboardGet, ClipboardGetResp, ClipboardSet, FrameError, KillProcess, LaunchApp,
-    LaunchAppResp, ListProcesses, ProcFilter, ProcessInfo, ProcessSelector, Request, Response,
-    ShellChunk, ShellExec, ShellExecResult, ShellKind, MAX_FRAME_BYTES,
+    decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, ActionOpts,
+    ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, FrameError, KillProcess, LaunchApp,
+    LaunchAppResp, ListProcesses, ProcFilter, ProcessInfo, ProcessSelector, RegionSpec, Request,
+    Response, ScreenshotOpts, ScreenshotPayload, ShellChunk, ShellExec, ShellExecResult, ShellKind,
+    MAX_FRAME_BYTES,
 };

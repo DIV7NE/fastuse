@@ -12,6 +12,65 @@ use crate::redact::Redact;
 use crate::selector::Selector;
 use crate::uia_node::{ImageFormat, TreeView, UIANode};
 
+/// Region specifier for `ScreenshotOpts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionSpec {
+    /// Capture the foreground window's client rect at the moment the
+    /// post-action snapshot fires.
+    Auto,
+    /// Explicit rectangle in physical-pixel virtual-desktop coordinates.
+    Rect {
+        /// Top-left x.
+        x: i32,
+        /// Top-left y.
+        y: i32,
+        /// Width in physical pixels.
+        w: u32,
+        /// Height in physical pixels.
+        h: u32,
+    },
+}
+
+/// Post-action screenshot options bundled into `ActionOpts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotOpts {
+    /// Region to capture; `None` = whole primary monitor.
+    pub region: Option<RegionSpec>,
+    /// Output format; `None` = JPEG (default).
+    pub format: Option<ImageFormat>,
+    /// JPEG quality (0..=100); ignored for PNG. `None` = 85.
+    pub quality: Option<u8>,
+}
+
+/// Optional post-action perception bundle — collapses perceive→act→perceive
+/// into a single tool call. Absent on legacy clients (decoded as `None`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionOpts {
+    /// Poll UIA after the action until this selector matches or
+    /// `wait_timeout_ms` elapses. The action's response includes
+    /// `waited_ms` and `wait_matched` so the agent can branch.
+    pub wait_for: Option<Selector>,
+    /// Capture a screenshot after the action (and after `wait_for` if set).
+    pub screenshot_after: Option<ScreenshotOpts>,
+    /// Like `wait_for`, but timeout = action failed.
+    pub verify: Option<Selector>,
+    /// Timeout shared by `wait_for` and `verify`. Default 2000ms when unset.
+    pub wait_timeout_ms: Option<u32>,
+}
+
+/// Screenshot payload re-used by `ActionResult` and `Response::Screenshot`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotPayload {
+    /// Encoded bytes (JPEG or PNG). MCP edge re-encodes to base64.
+    pub bytes: Redact<Vec<u8>>,
+    /// MIME type (`image/jpeg` or `image/png`).
+    pub mime: String,
+    /// Width in physical pixels.
+    pub width: u32,
+    /// Height in physical pixels.
+    pub height: u32,
+}
+
 /// Hard cap on a single frame payload. Per threat T-01-02, an oversized
 /// length-prefix declared by an attacker MUST NOT cause unbounded allocation.
 pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
@@ -56,6 +115,8 @@ pub enum Request {
         modifiers: Vec<String>,
         /// If true, skip the implicit `SetCursorPos` before injecting clicks.
         skip_set_cursor_pos: bool,
+        /// Optional post-action perception bundle (Phase 5 agent-loop wins).
+        opts: Option<ActionOpts>,
     },
     /// Move the cursor to `(x, y)` (no click).
     MouseMove {
@@ -63,16 +124,22 @@ pub enum Request {
         x: i32,
         /// Target y in physical pixels (virtual-desktop origin).
         y: i32,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Press (DOWN) the given mouse button at the current cursor position.
     MouseDown {
         /// Button to press.
         button: MouseButton,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Release (UP) the given mouse button at the current cursor position.
     MouseUp {
         /// Button to release.
         button: MouseButton,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Click-drag from `(start_x, start_y)` to `(end_x, end_y)` with `button`
     /// held. Modifiers are held for the entire drag.
@@ -89,6 +156,8 @@ pub enum Request {
         button: MouseButton,
         /// Modifier chord tokens to hold during the drag.
         modifiers: Vec<String>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Mouse-wheel scroll at `(x, y)` in `direction` for `amount` notches
     /// (one notch = `WHEEL_DELTA` = 120).
@@ -103,12 +172,16 @@ pub enum Request {
         amount: i32,
         /// Modifier chord tokens to hold during the scroll.
         modifiers: Vec<String>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Type literal Unicode text via `KEYEVENTF_UNICODE`. Payload is wrapped
     /// in `Redact<T>` so logs never expose it.
     Type {
         /// Unicode payload to type, redacted from `Display`/`Debug` (D-10).
         text: Redact<String>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Press a chord (e.g. `"ctrl+s"`, `"alt+f4"`, `"win+d"`) `repeat` times.
     Key {
@@ -116,6 +189,8 @@ pub enum Request {
         chord: String,
         /// Number of full DOWN/UP cycles for the primary key.
         repeat: u32,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Press a chord and hold for `duration_ms` milliseconds before release.
     HoldKey {
@@ -123,6 +198,8 @@ pub enum Request {
         chord: String,
         /// Hold duration in milliseconds.
         duration_ms: u32,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Sleep `duration_ms` server-side (does NOT occupy the input thread).
     Wait {
@@ -151,6 +228,8 @@ pub enum Request {
     FocusWindow {
         /// HWND cast to `u64`.
         hwnd: u64,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Move + resize the window in physical-pixel virtual-desktop space.
     ResizeMoveWindow {
@@ -164,6 +243,8 @@ pub enum Request {
         w: i32,
         /// New height in physical pixels.
         h: i32,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
 
     // --- Phase 3: capture (CAP-01..06) ---
@@ -222,6 +303,8 @@ pub enum Request {
         selector: Selector,
         /// Modifier chord tokens to hold during the click.
         modifiers: Option<Vec<String>>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Find an element via selector, focus it, and type into it
     /// (delegates to Phase 2 `input::type_text` after `SetFocus`).
@@ -230,6 +313,8 @@ pub enum Request {
         selector: Selector,
         /// Unicode payload to type, redacted from logs (T-03-01).
         text: Redact<String>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
     /// Poll for an element until it appears or timeout.
     WaitForElement {
@@ -243,19 +328,31 @@ pub enum Request {
     ScrollIntoView {
         /// Selector expression.
         selector: Selector,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
     },
 
     // --- Phase 4: system surface ---
     /// Read clipboard contents (Phase 4).
     ClipboardGet(ClipboardGet),
     /// Write clipboard contents (Phase 4).
-    ClipboardSet(ClipboardSet),
+    ClipboardSet {
+        /// Clipboard write payload.
+        req: ClipboardSet,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
     /// Spawn a shell command and stream output (Phase 4). The wire layer
     /// returns a single `ShellExecResult` summary; streaming chunks are
     /// emitted out-of-band by the MCP server (see `ShellChunk`).
     ShellExec(ShellExec),
     /// Launch an application by query (Phase 4).
-    LaunchApp(LaunchApp),
+    LaunchApp {
+        /// Launch request payload.
+        req: LaunchApp,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
     /// Enumerate running processes (Phase 4).
     ListProcesses(ListProcesses),
     /// Terminate a process by PID or name (Phase 4).
@@ -613,6 +710,20 @@ pub enum Response {
         /// timeout).
         matched: bool,
     },
+    /// Action result with optional post-action perception. Used when the
+    /// caller passed `ActionOpts`. Without `opts`, dispatchers continue to
+    /// return `Ack` / `Element` as before.
+    ActionResult {
+        /// True if `verify` was None or matched within timeout.
+        ok: bool,
+        /// `wait_for` outcome: `Some(true)` matched, `Some(false)` timed out,
+        /// `None` not requested.
+        wait_matched: Option<bool>,
+        /// Wall-clock time spent in `wait_for` polling.
+        waited_ms: u32,
+        /// Optional post-action screenshot.
+        screenshot: Option<Box<ScreenshotPayload>>,
+    },
 
     // --- Phase 4 ---
     /// `clipboard_get` reply.
@@ -776,7 +887,10 @@ mod tests {
 
     #[test]
     fn clipboard_set_text_round_trips() {
-        let req = Request::ClipboardSet(ClipboardSet::Text(Redact::new("hello".to_string())));
+        let req = Request::ClipboardSet {
+            req: ClipboardSet::Text(Redact::new("hello".to_string())),
+            opts: None,
+        };
         let bytes = encode_frame(&req).unwrap();
         let mut cur = Cursor::new(bytes);
         let decoded: Request = decode_frame(&mut cur).unwrap();
@@ -785,12 +899,15 @@ mod tests {
 
     #[test]
     fn clipboard_set_image_round_trips() {
-        let req = Request::ClipboardSet(ClipboardSet::Image {
-            mime: "image/png".into(),
-            bytes: Redact::new(vec![1u8, 2, 3, 4]),
-            w: 4,
-            h: 4,
-        });
+        let req = Request::ClipboardSet {
+            req: ClipboardSet::Image {
+                mime: "image/png".into(),
+                bytes: Redact::new(vec![1u8, 2, 3, 4]),
+                w: 4,
+                h: 4,
+            },
+            opts: None,
+        };
         let bytes = encode_frame(&req).unwrap();
         let mut cur = Cursor::new(bytes);
         let decoded: Request = decode_frame(&mut cur).unwrap();
@@ -815,9 +932,10 @@ mod tests {
 
     #[test]
     fn launch_app_round_trips() {
-        let req = Request::LaunchApp(LaunchApp {
-            query: "notepad".into(),
-        });
+        let req = Request::LaunchApp {
+            req: LaunchApp { query: "notepad".into() },
+            opts: None,
+        };
         let bytes = encode_frame(&req).unwrap();
         let mut cur = Cursor::new(bytes);
         let decoded: Request = decode_frame(&mut cur).unwrap();
@@ -949,10 +1067,12 @@ mod tests {
             Request::ClickElement {
                 selector: Selector::ByName("OK".into()),
                 modifiers: Some(vec!["ctrl".into()]),
+                opts: None,
             },
             Request::TypeIntoElement {
                 selector: Selector::ByAutomationId("editor".into()),
                 text: Redact::new("hello".to_string()),
+                opts: None,
             },
             Request::WaitForElement {
                 selector: Selector::ByName("Loaded".into()),
@@ -960,6 +1080,7 @@ mod tests {
             },
             Request::ScrollIntoView {
                 selector: Selector::ByClass("ListItem".into()),
+                opts: None,
             },
         ];
         for r in cases {
@@ -1008,5 +1129,33 @@ mod tests {
             pipe_path_pattern(),
             r"\\.\pipe\fastuse-{session_id}-{user_sid_short}"
         );
+    }
+
+    #[test]
+    fn click_with_action_opts_round_trips() {
+        use crate::selector::Selector;
+        use crate::uia_node::ControlType;
+        let req = Request::Click {
+            x: 100,
+            y: 200,
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: vec![],
+            skip_set_cursor_pos: false,
+            opts: Some(ActionOpts {
+                wait_for: Some(Selector::ByName("Saved".into())),
+                screenshot_after: Some(ScreenshotOpts {
+                    region: Some(RegionSpec::Auto),
+                    format: Some(ImageFormat::Jpeg),
+                    quality: Some(85),
+                }),
+                verify: Some(Selector::ByControlType(ControlType::Window)),
+                wait_timeout_ms: Some(2000),
+            }),
+        };
+        let bytes = encode_frame(&req).unwrap();
+        let mut cur = std::io::Cursor::new(bytes);
+        let decoded: Request = decode_frame(&mut cur).unwrap();
+        assert_eq!(req, decoded);
     }
 }
