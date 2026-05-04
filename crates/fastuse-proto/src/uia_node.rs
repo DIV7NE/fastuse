@@ -19,6 +19,7 @@ use crate::redact::Redact;
 /// surfaced to MCP/CLI clients. Matches the closed set the selector
 /// grammar can target. Unknown control types fall through to `Custom`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ControlType {
     /// `UIA_ButtonControlTypeId`.
     Button,
@@ -56,6 +57,7 @@ pub enum ControlType {
 
 /// Tree walker view selection. Default `Content` (skips chrome).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TreeView {
     /// `IUIAutomation::ContentViewWalker`.
     Content,
@@ -71,6 +73,7 @@ impl Default for TreeView {
 
 /// Image format for screenshot encoding (Phase 3 CAP-05). JPEG default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ImageFormat {
     /// JPEG q=85 (default).
     Jpeg,
@@ -90,6 +93,7 @@ impl Default for ImageFormat {
 /// pass. `value` is `Redact<String>` so password-like fields never leak
 /// through Debug/Display.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UIANode {
     /// `UIA_NamePropertyId`.
     pub name: String,

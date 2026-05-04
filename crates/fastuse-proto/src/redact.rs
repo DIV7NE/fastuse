@@ -72,6 +72,19 @@ impl<const N: usize> RedactLen for [u8; N] {
     }
 }
 
+// JsonSchema is opt-in via the `schema` feature so MCP can publish input/output
+// schemas for tools whose payload includes Redact<T>. The redacted shape on
+// the wire is identical to `T` (transparent serde), so we delegate.
+#[cfg(feature = "schema")]
+impl<T: schemars::JsonSchema> schemars::JsonSchema for Redact<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        T::schema_name()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        T::json_schema(generator)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -186,6 +186,125 @@ pub struct ResizeMoveArgs {
     pub h: i32,
 }
 
+// ---------- Phase 3 input schemas ----------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotArgs {
+    pub monitor: Option<u32>,
+    /// "jpeg" (default, q=85) or "png".
+    pub format: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotRegionArgs {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub monitor: Option<u32>,
+    pub format: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UiaTreeArgs {
+    pub hwnd: Option<u64>,
+    pub depth: Option<u32>,
+    /// "content" (default) or "raw".
+    pub view: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SelectorArgs {
+    /// Selector JSON: { "ByName": "OK" } / { "ByControlType": "Button" } /
+    /// { "And": [...] } etc. -- matches fastuse_proto::Selector serde shape.
+    pub selector: serde_json::Value,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UiaQueryArgs {
+    pub selector: serde_json::Value,
+    pub root_hwnd: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InspectAtPointArgs {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClickElementArgs {
+    pub selector: serde_json::Value,
+    #[serde(default)]
+    pub modifiers: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TypeIntoElementArgs {
+    pub selector: serde_json::Value,
+    pub text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WaitForElementArgs {
+    pub selector: serde_json::Value,
+    #[serde(default)]
+    pub timeout_ms: u32,
+}
+
+// ---------- Phase 3 output schemas ----------
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ScreenshotOutput {
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    /// base64-encoded image bytes (T-03-03: never logged in tracing).
+    pub data_b64: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct UiaTreeOutput {
+    pub root: fastuse_proto::UIANode,
+    pub degraded: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct UiaQueryOutput {
+    pub matches: Vec<fastuse_proto::UIANode>,
+    pub degraded: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct InspectOutput {
+    pub node: fastuse_proto::UIANode,
+    pub degraded: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ElementMatchOutput {
+    pub matched: bool,
+}
+
+fn parse_image_format(s: Option<&str>) -> fastuse_proto::ImageFormat {
+    match s.map(|t| t.to_lowercase()) {
+        Some(t) if t == "png" => fastuse_proto::ImageFormat::Png,
+        _ => fastuse_proto::ImageFormat::Jpeg,
+    }
+}
+
+fn parse_tree_view(s: Option<&str>) -> fastuse_proto::TreeView {
+    match s.map(|t| t.to_lowercase()) {
+        Some(t) if t == "raw" => fastuse_proto::TreeView::Raw,
+        _ => fastuse_proto::TreeView::Content,
+    }
+}
+
+fn parse_selector(v: serde_json::Value) -> Result<fastuse_proto::Selector, McpError> {
+    serde_json::from_value(v)
+        .map_err(|e| McpError::invalid_params(format!("selector: {e}"), None))
+}
+
 fn parse_button(s: &str) -> Result<MouseButton, McpError> {
     match s.to_lowercase().as_str() {
         "left" | "l" => Ok(MouseButton::Left),
@@ -353,6 +472,116 @@ impl Fastuse {
     async fn resize_move_window(&self, Parameters(args): Parameters<ResizeMoveArgs>) -> Result<Json<AckOutput>, McpError> {
         let req = Request::ResizeMoveWindow { hwnd: args.hwnd, x: args.x, y: args.y, w: args.w, h: args.h };
         ack(self.call(req).await?)
+    }
+
+    // ---- Phase 3: capture ----
+    #[tool(name = "screenshot", description = "Full-monitor screenshot. Returns base64-encoded JPEG (q=85, default) or PNG.")]
+    async fn screenshot(&self, Parameters(args): Parameters<ScreenshotArgs>) -> Result<Json<ScreenshotOutput>, McpError> {
+        let req = Request::Screenshot {
+            monitor: args.monitor,
+            format: Some(parse_image_format(args.format.as_deref())),
+        };
+        screenshot_response(self.call(req).await?)
+    }
+
+    #[tool(name = "screenshot_region", description = "Sub-rectangle screenshot. Reuses cached duplication object (no reacquire).")]
+    async fn screenshot_region(&self, Parameters(args): Parameters<ScreenshotRegionArgs>) -> Result<Json<ScreenshotOutput>, McpError> {
+        let req = Request::ScreenshotRegion {
+            x: args.x,
+            y: args.y,
+            w: args.w,
+            h: args.h,
+            monitor: args.monitor,
+            format: Some(parse_image_format(args.format.as_deref())),
+        };
+        screenshot_response(self.call(req).await?)
+    }
+
+    // ---- Phase 3: UIA ----
+    #[tool(name = "uia_tree", description = "Walk the UIA subtree of an HWND (foreground if None) using a single CacheRequest pass.")]
+    async fn uia_tree(&self, Parameters(args): Parameters<UiaTreeArgs>) -> Result<Json<UiaTreeOutput>, McpError> {
+        let req = Request::UiaTree {
+            hwnd: args.hwnd,
+            depth: args.depth,
+            view: Some(parse_tree_view(args.view.as_deref())),
+        };
+        match self.call(req).await? {
+            Response::UiaTree { root, degraded } => Ok(Json(UiaTreeOutput { root, degraded })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "uia_query", description = "Selector-driven query against a UIA root (foreground if None). Selector grammar: ByName / ByAutomationId / ByControlType / ByClass + And/Or/Not.")]
+    async fn uia_query(&self, Parameters(args): Parameters<UiaQueryArgs>) -> Result<Json<UiaQueryOutput>, McpError> {
+        let selector = parse_selector(args.selector)?;
+        let req = Request::UiaQuery {
+            selector,
+            root_hwnd: args.root_hwnd,
+        };
+        match self.call(req).await? {
+            Response::UiaQuery { matches, degraded } => Ok(Json(UiaQueryOutput { matches, degraded })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "inspect_at_point", description = "Inspect the single UIA element under a screen point.")]
+    async fn inspect_at_point(&self, Parameters(args): Parameters<InspectAtPointArgs>) -> Result<Json<InspectOutput>, McpError> {
+        let req = Request::InspectAtPoint { x: args.x, y: args.y };
+        match self.call(req).await? {
+            Response::Inspect { node, degraded } => Ok(Json(InspectOutput { node, degraded })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "click_element", description = "Find an element via selector and click its centroid. Delegates to phase2 click after centroid resolution.")]
+    async fn click_element(&self, Parameters(args): Parameters<ClickElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+        let selector = parse_selector(args.selector)?;
+        let req = Request::ClickElement { selector, modifiers: args.modifiers };
+        element_response(self.call(req).await?)
+    }
+
+    #[tool(name = "type_into_element", description = "Find an element via selector, focus it, type text. Payload is redacted from logs.")]
+    async fn type_into_element(&self, Parameters(args): Parameters<TypeIntoElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+        let selector = parse_selector(args.selector)?;
+        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text) };
+        element_response(self.call(req).await?)
+    }
+
+    #[tool(name = "wait_for_element", description = "Poll for an element until it appears or timeout (default 5000ms). Returns matched=true/false.")]
+    async fn wait_for_element(&self, Parameters(args): Parameters<WaitForElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+        let selector = parse_selector(args.selector)?;
+        let req = Request::WaitForElement { selector, timeout_ms: args.timeout_ms };
+        element_response(self.call(req).await?)
+    }
+
+    #[tool(name = "scroll_into_view", description = "Scroll the matched element into view via UIA ScrollItemPattern.")]
+    async fn scroll_into_view(&self, Parameters(args): Parameters<SelectorArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
+        let selector = parse_selector(args.selector)?;
+        let req = Request::ScrollIntoView { selector };
+        element_response(self.call(req).await?)
+    }
+}
+
+fn screenshot_response(res: Response) -> Result<Json<ScreenshotOutput>, McpError> {
+    use base64::Engine;
+    match res {
+        Response::Screenshot { bytes, mime, width, height } => {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
+            Ok(Json(ScreenshotOutput { mime, width, height, data_b64 }))
+        }
+        Response::Error(e) => Err(Fastuse::err_from_proto(e)),
+        other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+    }
+}
+
+fn element_response(res: Response) -> Result<Json<ElementMatchOutput>, McpError> {
+    match res {
+        Response::Element { matched } => Ok(Json(ElementMatchOutput { matched })),
+        Response::Error(e) => Err(Fastuse::err_from_proto(e)),
+        other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
     }
 }
 
