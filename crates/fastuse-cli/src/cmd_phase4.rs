@@ -1,0 +1,180 @@
+//! Phase 4 system-surface CLI subcommands.
+//!
+//! Pattern matches `cmd_phase3.rs`: one_call + handshake helpers, JSON output.
+
+use fastuse_proto::{
+    ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, KillProcess, LaunchApp,
+    ListProcesses, ProcFilter, ProcessSelector, Redact, Request, Response, ShellExec, ShellKind,
+};
+use serde_json::json;
+use tokio::net::windows::named_pipe::NamedPipeClient;
+
+use crate::proto_io::{read_response, write_request};
+use crate::spawn::connect_or_spawn;
+
+async fn one_call(pipe_path: &str, req: Request) -> anyhow::Result<Response> {
+    let mut pipe = connect_or_spawn(pipe_path).await?;
+    handshake(&mut pipe).await?;
+    write_request(&mut pipe, &req).await?;
+    Ok(read_response(&mut pipe).await?)
+}
+
+async fn handshake(pipe: &mut NamedPipeClient) -> anyhow::Result<()> {
+    let hello = Request::Hello {
+        client_kind: "cli".into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        requested_idle_timeout_secs: None,
+    };
+    write_request(pipe, &hello).await?;
+    let _ = read_response(pipe).await?;
+    Ok(())
+}
+
+fn parse_shell(s: Option<&str>) -> anyhow::Result<ShellKind> {
+    Ok(match s.map(str::to_lowercase).as_deref() {
+        Some("powershell") => ShellKind::Powershell,
+        Some("pwsh") => ShellKind::Pwsh,
+        Some("bash") => ShellKind::Bash,
+        Some("cmd") | None => ShellKind::Cmd,
+        Some(other) => anyhow::bail!("unknown shell: {other}"),
+    })
+}
+
+fn parse_proc_selector(s: &str) -> anyhow::Result<ProcessSelector> {
+    if let Some(pid) = s.strip_prefix("pid:") {
+        Ok(ProcessSelector::Pid(pid.parse()?))
+    } else if let Some(name) = s.strip_prefix("name:") {
+        Ok(ProcessSelector::Name(name.to_string()))
+    } else {
+        anyhow::bail!("selector must be 'pid:<n>' or 'name:<stem>'")
+    }
+}
+
+pub async fn clipboard_get_text(pipe_path: &str) -> anyhow::Result<()> {
+    let req = Request::ClipboardGet(ClipboardGet { format: Some(ClipFormat::Text) });
+    match one_call(pipe_path, req).await? {
+        Response::ClipboardGet(ClipboardGetResp::Text { text }) => {
+            println!("{}", json!({"ok": true, "present": true, "text": text.into_inner()}));
+            Ok(())
+        }
+        Response::ClipboardGet(_) => {
+            println!("{}", json!({"ok": true, "present": false}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn clipboard_set_text(pipe_path: &str, text: String) -> anyhow::Result<()> {
+    let req = Request::ClipboardSet(ClipboardSet::Text(Redact::new(text)));
+    match one_call(pipe_path, req).await? {
+        Response::ClipboardSet => {
+            println!("{}", json!({"ok": true}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn shell_exec(
+    pipe_path: &str,
+    command: String,
+    shell: Option<&str>,
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+) -> anyhow::Result<()> {
+    let req = Request::ShellExec(ShellExec {
+        command: Redact::new(command),
+        shell: Some(parse_shell(shell)?),
+        env: None,
+        cwd,
+        timeout_ms,
+        stream_chunk_size: None,
+    });
+    match one_call(pipe_path, req).await? {
+        Response::ShellExec(r) => {
+            use base64::Engine;
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "status": r.status,
+                    "truncated": r.truncated,
+                    "duration_ms": r.duration_ms,
+                    "stdout_b64": base64::engine::general_purpose::STANDARD.encode(r.stdout.into_inner()),
+                    "stderr_b64": base64::engine::general_purpose::STANDARD.encode(r.stderr.into_inner()),
+                })
+            );
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn launch_app(pipe_path: &str, query: String) -> anyhow::Result<()> {
+    let req = Request::LaunchApp(LaunchApp { query });
+    match one_call(pipe_path, req).await? {
+        Response::LaunchApp(r) => {
+            println!(
+                "{}",
+                json!({"ok": true, "pid": r.pid, "hwnd": r.hwnd, "title": r.title, "class": r.class})
+            );
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn list_processes(
+    pipe_path: &str,
+    name_contains: Option<String>,
+    visible_only: Option<bool>,
+) -> anyhow::Result<()> {
+    let filter = (name_contains.is_some() || visible_only.is_some()).then(|| ProcFilter {
+        name_contains,
+        visible_only,
+    });
+    let req = Request::ListProcesses(ListProcesses { filter });
+    match one_call(pipe_path, req).await? {
+        Response::ListProcesses(v) => {
+            println!("{}", json!({"ok": true, "processes": v}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn kill_process(
+    pipe_path: &str,
+    selector: String,
+    force: Option<bool>,
+    process_tree: Option<bool>,
+) -> anyhow::Result<()> {
+    let req = Request::KillProcess(KillProcess {
+        selector: parse_proc_selector(&selector)?,
+        force,
+        process_tree,
+    });
+    match one_call(pipe_path, req).await? {
+        Response::KillProcess { terminated } => {
+            println!("{}", json!({"ok": true, "terminated": terminated}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+fn print_err(e: fastuse_proto::Error) -> anyhow::Result<()> {
+    let body = json!({
+        "ok": false,
+        "error": { "code": e.code.as_str(), "message": e.message, "hint": e.hint }
+    });
+    eprintln!("{body}");
+    std::process::exit(1);
+}

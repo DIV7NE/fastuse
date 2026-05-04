@@ -2,6 +2,7 @@
 
 mod cmd_phase2;
 mod cmd_phase3;
+mod cmd_phase4;
 mod cmd_ping;
 mod cmd_start;
 mod cmd_status;
@@ -263,6 +264,54 @@ enum Cmd {
         /// Selector JSON.
         selector: String,
     },
+
+    // ----- Phase 4: clipboard / shell / launch / processes -----
+    /// Read text from the clipboard.
+    ClipboardGetText,
+    /// Write text to the clipboard.
+    ClipboardSetText {
+        /// Text to write.
+        text: String,
+    },
+    /// Run a shell command (permission-gated).
+    ShellExec {
+        /// Command line.
+        command: String,
+        /// Shell: cmd | powershell | pwsh | bash.
+        #[arg(long)]
+        shell: Option<String>,
+        /// Working directory.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Timeout in milliseconds (default 30000).
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
+    /// Launch an application by query.
+    LaunchApp {
+        /// Path / PATH binary / URI / app name.
+        query: String,
+    },
+    /// Enumerate running processes.
+    ListProcesses {
+        /// Substring filter on process name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Restrict to processes with a visible main window.
+        #[arg(long)]
+        visible_only: bool,
+    },
+    /// Terminate a process (permission-gated).
+    KillProcess {
+        /// 'pid:<n>' or 'name:<stem>'.
+        selector: String,
+        /// Best-effort hard-kill.
+        #[arg(long)]
+        force: bool,
+        /// Kill the entire process tree.
+        #[arg(long)]
+        process_tree: bool,
+    },
 }
 
 fn parse_hwnd(s: &str) -> anyhow::Result<u64> {
@@ -381,6 +430,26 @@ fn main() {
             }
             Cmd::ScrollIntoView { selector } => {
                 cmd_phase3::scroll_into_view(&identity.path, &selector).await
+            }
+
+            // ---- Phase 4 ----
+            Cmd::ClipboardGetText => cmd_phase4::clipboard_get_text(&identity.path).await,
+            Cmd::ClipboardSetText { text } => cmd_phase4::clipboard_set_text(&identity.path, text).await,
+            Cmd::ShellExec { command, shell, cwd, timeout_ms } => {
+                cmd_phase4::shell_exec(&identity.path, command, shell.as_deref(), cwd, timeout_ms).await
+            }
+            Cmd::LaunchApp { query } => cmd_phase4::launch_app(&identity.path, query).await,
+            Cmd::ListProcesses { name, visible_only } => {
+                let v = if visible_only { Some(true) } else { None };
+                cmd_phase4::list_processes(&identity.path, name, v).await
+            }
+            Cmd::KillProcess { selector, force, process_tree } => {
+                cmd_phase4::kill_process(
+                    &identity.path,
+                    selector,
+                    if force { Some(true) } else { None },
+                    if process_tree { Some(true) } else { None },
+                ).await
             }
         }
     });
