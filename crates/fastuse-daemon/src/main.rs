@@ -15,6 +15,7 @@ mod idle;
 mod sd;
 mod sentinel;
 mod server;
+mod session;
 mod singleton;
 mod tracing_init;
 
@@ -31,6 +32,24 @@ struct Args {
     /// Idle timeout in seconds (0 disables; default 300 = 5 min).
     #[arg(long, default_value_t = 300)]
     idle_timeout: u64,
+    /// Comma-separated list of Confirmed-tier tools to grant (or `*` for all).
+    /// Falls back to the `FASTUSE_ALLOW` env var. Set ONCE at daemon
+    /// start; immutable for the lifetime of every session served.
+    #[arg(long, default_value = "")]
+    allow: String,
+}
+
+fn parse_allow(arg: &str, env_fallback: Option<String>) -> Vec<String> {
+    let raw = if arg.is_empty() {
+        env_fallback.unwrap_or_default()
+    } else {
+        arg.to_string()
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn main() {
@@ -119,6 +138,11 @@ fn main() {
         }
     };
 
+    let allow = parse_allow(&args.allow, std::env::var("FASTUSE_ALLOW").ok());
+    if !allow.is_empty() {
+        tracing::info!(?allow, "permission allow-list active");
+    }
+
     let server_result = rt.block_on(async {
         server::serve(
             identity.path.clone(),
@@ -127,6 +151,7 @@ fn main() {
             capture.as_ref(),
             args.idle_timeout,
             identity.session_id,
+            allow,
         )
         .await
     });

@@ -24,16 +24,53 @@ pub fn run(workspace_root: &Path) -> anyhow::Result<()> {
         if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        if !is_in_scope(p) {
-            continue;
+        if is_in_scope(p) {
+            let src = std::fs::read_to_string(p)?;
+            if let Err(msg) = check_source(&src) {
+                failures.push(format!("{}: {}", p.display(), msg));
+            }
         }
-        let src = std::fs::read_to_string(p)?;
-        if let Err(msg) = check_source(&src) {
-            failures.push(format!("{}: {}", p.display(), msg));
+        // PITFALLS anti-pattern (Phase 4): no std::process::Command in shell/.
+        if is_shell_module(p) {
+            let src = std::fs::read_to_string(p)?;
+            if let Err(msg) = check_no_std_process_command(&src) {
+                failures.push(format!("{}: {}", p.display(), msg));
+            }
         }
     }
     if !failures.is_empty() {
         anyhow::bail!("check-redact failures:\n{}", failures.join("\n"));
+    }
+    Ok(())
+}
+
+/// Is this file inside `crates/fastuse-win/src/shell/`?
+fn is_shell_module(p: &Path) -> bool {
+    let s = p.to_string_lossy().replace('\\', "/");
+    s.contains("/fastuse-win/src/shell/")
+}
+
+/// Reject `std::process::Command` usage in shell-module files. Comments are
+/// stripped before scanning so docstrings can reference the anti-pattern.
+pub fn check_no_std_process_command(src: &str) -> Result<(), String> {
+    let mut violations: Vec<String> = Vec::new();
+    for (lineno, line) in src.lines().enumerate() {
+        // Strip line comments.
+        let code = match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        // Reject the bare reference. tokio::process::Command is fine — it
+        // contains "process::Command" but not "std::process::Command".
+        if code.contains("std::process::Command") {
+            violations.push(format!(
+                "line {}: std::process::Command forbidden in shell/ — use tokio::process::Command (PITFALLS anti-pattern)",
+                lineno + 1
+            ));
+        }
+    }
+    if !violations.is_empty() {
+        return Err(violations.join("; "));
     }
     Ok(())
 }
@@ -133,5 +170,23 @@ mod tests {
             }
         "#;
         assert!(check_source(src).is_err());
+    }
+
+    #[test]
+    fn rejects_std_process_command() {
+        let src = "use std::process::Command;\nfn run() { Command::new(\"x\"); }";
+        assert!(check_no_std_process_command(src).is_err());
+    }
+
+    #[test]
+    fn allows_tokio_process_command() {
+        let src = "use tokio::process::Command;\nfn run() { Command::new(\"x\"); }";
+        assert!(check_no_std_process_command(src).is_ok());
+    }
+
+    #[test]
+    fn ignores_std_process_command_in_comments() {
+        let src = "// Forbidden: std::process::Command (PITFALLS)\nfn ok() {}";
+        assert!(check_no_std_process_command(src).is_ok());
     }
 }

@@ -15,6 +15,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use crate::dispatch::{handle, DispatchCtx};
 use crate::idle::{spawn_watcher, ActivityClock};
 use crate::sd::{current_user_only, sa_ptr};
+use crate::session::Session;
 
 /// Run the daemon pipe server. Returns when shutdown is requested.
 pub async fn serve(
@@ -24,6 +25,7 @@ pub async fn serve(
     _capture: Option<&CaptureThreadHandle>,
     idle_timeout_secs: u64,
     session_id: u32,
+    allow: Vec<String>,
 ) -> std::io::Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let clock = Arc::new(ActivityClock::default());
@@ -91,6 +93,7 @@ pub async fn serve(
             input: input_arc.clone(),
             shutdown_flag: Arc::clone(&shutdown),
             idle_timeout_secs,
+            session: Session::new(allow.clone()),
         };
 
         tokio::spawn(async move {
@@ -135,14 +138,10 @@ async fn serve_connection(mut pipe: NamedPipeServer, ctx: DispatchCtx) -> std::i
             Err(e) => return Err(e),
         };
         let pipe_recv = Instant::now();
-        // Dispatch may perform a blocking sync mpsc::recv on the input thread
-        // round-trip (D-26: no Win32 work on tokio workers). Punt to a
-        // blocking-friendly thread to keep the runtime's worker threads free
-        // for other connections (CR-02).
-        let ctx_for_dispatch = std::sync::Arc::clone(&ctx);
-        let result = tokio::task::spawn_blocking(move || handle(req, &ctx_for_dispatch))
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("dispatch join: {e}")))?;
+        // Phase 4: dispatch is async (shell_exec needs the tokio runtime).
+        // Win32-blocking sub-ops (clipboard, process, launch) are fast enough
+        // (<5ms typical) to run inline without tying up a worker thread.
+        let result = handle(req, &ctx).await;
         let pipe_rtt_us = pipe_recv.elapsed().as_micros() as i64;
         tracing::info!(
             pipe_rtt_us,
