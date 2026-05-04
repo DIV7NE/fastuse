@@ -286,6 +286,112 @@ pub struct ElementMatchOutput {
     pub matched: bool,
 }
 
+// ---------- Phase 4 input schemas ----------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClipboardGetTextArgs {}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClipboardSetTextArgs {
+    pub text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ShellExecArgs {
+    pub command: String,
+    /// "cmd" (default) | "powershell" | "pwsh" | "bash"
+    pub shell: Option<String>,
+    /// Working directory.
+    pub cwd: Option<String>,
+    /// Timeout in milliseconds (default 30000).
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct LaunchAppArgs {
+    pub query: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ListProcessesArgs {
+    pub name_contains: Option<String>,
+    pub visible_only: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct KillProcessArgs {
+    /// Either "pid:1234" or "name:notepad".
+    pub selector: String,
+    pub force: Option<bool>,
+    pub process_tree: Option<bool>,
+}
+
+// ---------- Phase 4 output schemas ----------
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ClipboardTextOutput {
+    pub present: bool,
+    pub text: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ShellExecOutput {
+    pub status: i32,
+    pub truncated: bool,
+    pub duration_ms: u64,
+    pub stdout_b64: String,
+    pub stderr_b64: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct LaunchAppOutput {
+    pub pid: u32,
+    pub hwnd: Option<isize>,
+    pub title: Option<String>,
+    pub class: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct KillProcessOutput {
+    pub terminated: u32,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ProcessInfoOutput {
+    pub pid: u32,
+    pub name: String,
+    pub exe_path: Option<String>,
+    pub main_hwnd: Option<isize>,
+}
+
+fn parse_shell_kind(s: Option<&str>) -> Option<fastuse_proto::ShellKind> {
+    use fastuse_proto::ShellKind;
+    Some(match s.map(str::to_lowercase).as_deref() {
+        Some("powershell") => ShellKind::Powershell,
+        Some("pwsh") => ShellKind::Pwsh,
+        Some("bash") => ShellKind::Bash,
+        Some("cmd") | None => ShellKind::Cmd,
+        _ => return None,
+    })
+}
+
+fn parse_proc_selector(s: &str) -> Result<fastuse_proto::ProcessSelector, McpError> {
+    use fastuse_proto::ProcessSelector;
+    if let Some(pid) = s.strip_prefix("pid:") {
+        let pid: u32 = pid.parse().map_err(|e| {
+            McpError::invalid_params(format!("pid: {e}"), None)
+        })?;
+        Ok(ProcessSelector::Pid(pid))
+    } else if let Some(name) = s.strip_prefix("name:") {
+        Ok(ProcessSelector::Name(name.to_string()))
+    } else {
+        Err(McpError::invalid_params(
+            "selector must be 'pid:<n>' or 'name:<stem>'".to_string(),
+            None,
+        ))
+    }
+}
+
 fn parse_image_format(s: Option<&str>) -> fastuse_proto::ImageFormat {
     match s.map(|t| t.to_lowercase()) {
         Some(t) if t == "png" => fastuse_proto::ImageFormat::Png,
@@ -562,6 +668,115 @@ impl Fastuse {
         let selector = parse_selector(args.selector)?;
         let req = Request::ScrollIntoView { selector };
         element_response(self.call(req).await?)
+    }
+
+    // ---- Phase 4: clipboard ----
+    #[tool(name = "clipboard_get_text", description = "Read text from the clipboard. Returns present=false if empty or non-text.")]
+    async fn clipboard_get_text(&self, Parameters(_): Parameters<ClipboardGetTextArgs>) -> Result<Json<ClipboardTextOutput>, McpError> {
+        let req = Request::ClipboardGet(fastuse_proto::ClipboardGet {
+            format: Some(fastuse_proto::ClipFormat::Text),
+        });
+        match self.call(req).await? {
+            Response::ClipboardGet(fastuse_proto::ClipboardGetResp::Text { text }) => {
+                Ok(Json(ClipboardTextOutput { present: true, text: Some(text.into_inner()) }))
+            }
+            Response::ClipboardGet(_) => Ok(Json(ClipboardTextOutput { present: false, text: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "clipboard_set_text", description = "Write text to the clipboard. Payload is wrapped in Redact<> end-to-end.")]
+    async fn clipboard_set_text(&self, Parameters(args): Parameters<ClipboardSetTextArgs>) -> Result<Json<AckOutput>, McpError> {
+        let req = Request::ClipboardSet(fastuse_proto::ClipboardSet::Text(Redact::new(args.text)));
+        match self.call(req).await? {
+            Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- Phase 4: shell ----
+    #[tool(name = "shell_exec", description = "Run a shell command. Permission-gated (Confirmed tier). stdout/stderr returned base64.")]
+    async fn shell_exec(&self, Parameters(args): Parameters<ShellExecArgs>) -> Result<Json<ShellExecOutput>, McpError> {
+        let shell = parse_shell_kind(args.shell.as_deref())
+            .ok_or_else(|| McpError::invalid_params("unknown shell".to_string(), None))?;
+        let req = Request::ShellExec(fastuse_proto::ShellExec {
+            command: Redact::new(args.command),
+            shell: Some(shell),
+            env: None,
+            cwd: args.cwd,
+            timeout_ms: args.timeout_ms,
+            stream_chunk_size: None,
+        });
+        match self.call(req).await? {
+            Response::ShellExec(r) => {
+                use base64::Engine;
+                Ok(Json(ShellExecOutput {
+                    status: r.status,
+                    truncated: r.truncated,
+                    duration_ms: r.duration_ms,
+                    stdout_b64: base64::engine::general_purpose::STANDARD.encode(r.stdout.into_inner()),
+                    stderr_b64: base64::engine::general_purpose::STANDARD.encode(r.stderr.into_inner()),
+                }))
+            }
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- Phase 4: launch / process ----
+    #[tool(name = "launch_app", description = "Launch an application by PATH binary, absolute path, or known URI scheme. Returns spawned PID and main HWND if visible within 3s.")]
+    async fn launch_app(&self, Parameters(args): Parameters<LaunchAppArgs>) -> Result<Json<LaunchAppOutput>, McpError> {
+        let req = Request::LaunchApp(fastuse_proto::LaunchApp { query: args.query });
+        match self.call(req).await? {
+            Response::LaunchApp(r) => Ok(Json(LaunchAppOutput {
+                pid: r.pid,
+                hwnd: r.hwnd,
+                title: r.title,
+                class: r.class,
+            })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "list_processes", description = "Enumerate running processes with optional name substring filter and visible-window filter.")]
+    async fn list_processes(&self, Parameters(args): Parameters<ListProcessesArgs>) -> Result<Json<Vec<ProcessInfoOutput>>, McpError> {
+        let filter = if args.name_contains.is_some() || args.visible_only.is_some() {
+            Some(fastuse_proto::ProcFilter {
+                name_contains: args.name_contains,
+                visible_only: args.visible_only,
+            })
+        } else {
+            None
+        };
+        let req = Request::ListProcesses(fastuse_proto::ListProcesses { filter });
+        match self.call(req).await? {
+            Response::ListProcesses(v) => Ok(Json(v.into_iter().map(|p| ProcessInfoOutput {
+                pid: p.pid,
+                name: p.name,
+                exe_path: p.exe_path,
+                main_hwnd: p.main_hwnd,
+            }).collect())),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(name = "kill_process", description = "Terminate a process by 'pid:<n>' or 'name:<stem>'. Permission-gated (Confirmed tier).")]
+    async fn kill_process(&self, Parameters(args): Parameters<KillProcessArgs>) -> Result<Json<KillProcessOutput>, McpError> {
+        let selector = parse_proc_selector(&args.selector)?;
+        let req = Request::KillProcess(fastuse_proto::KillProcess {
+            selector,
+            force: args.force,
+            process_tree: args.process_tree,
+        });
+        match self.call(req).await? {
+            Response::KillProcess { terminated } => Ok(Json(KillProcessOutput { terminated })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
     }
 }
 
