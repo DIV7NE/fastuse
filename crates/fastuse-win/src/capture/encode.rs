@@ -8,12 +8,23 @@
 //! Output: encoded bytes + MIME, mapped to `Response::Screenshot` at the
 //! handler edge.
 
+use std::cell::RefCell;
+
 use fastuse_proto::{Error as ProtoError, ErrorCode, ImageFormat};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
 
 use crate::capture::dxgi::FrameBuf;
+
+// WR-09: thread-local scratch buffer reused across encodes to keep
+// allocator pressure low (4K BGRA is ~33MB; per-call alloc/free of that
+// flushes the allocator's thread cache and produces p99 spikes).
+thread_local! {
+    static RGBA_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static RGB_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static OUT_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Encoded image plus its MIME type. Bytes ride the wire wrapped in
 /// `Redact<Vec<u8>>` (T-03-03) — never logged.
@@ -26,6 +37,11 @@ pub struct EncodedImage {
 }
 
 /// Encode a BGRA `FrameBuf` to JPEG (default q=85) or PNG.
+///
+/// WR-09: Reuses thread-local scratch buffers for the BGRA→RGBA pass and
+/// for the encoder output to avoid allocating ~14 MB per 1080p frame.
+/// JPEG path skips the RGBA→RGB conversion — `JpegEncoder` accepts
+/// `ColorType::Rgba8` and discards alpha internally.
 pub fn encode(buf: &FrameBuf, format: ImageFormat) -> Result<EncodedImage, ProtoError> {
     if buf.w == 0 || buf.h == 0 {
         return Err(ProtoError::new(
@@ -33,64 +49,80 @@ pub fn encode(buf: &FrameBuf, format: ImageFormat) -> Result<EncodedImage, Proto
             "zero-sized frame".to_string(),
         ));
     }
-    // BGRA → RGBA (image crate has no first-class BGRA encoder).
-    let rgba = bgra_to_rgba(&buf.bgra);
-
-    match format {
-        ImageFormat::Jpeg => encode_jpeg(&rgba, buf.w, buf.h),
-        ImageFormat::Png => encode_png(&rgba, buf.w, buf.h),
-    }
+    // BGRA → RGBA in-place into the thread-local scratch buffer.
+    let bytes = RGBA_SCRATCH.with(|s| -> Result<Vec<u8>, ProtoError> {
+        let mut rgba = s.borrow_mut();
+        bgra_to_rgba_into(&buf.bgra, &mut rgba);
+        match format {
+            ImageFormat::Jpeg => encode_jpeg(&rgba, buf.w, buf.h),
+            ImageFormat::Png => encode_png(&rgba, buf.w, buf.h),
+        }
+    })?;
+    let mime = match format {
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Png => "image/png",
+    };
+    Ok(EncodedImage { bytes, mime })
 }
 
-fn encode_jpeg(rgba: &[u8], w: u32, h: u32) -> Result<EncodedImage, ProtoError> {
-    let mut out = Vec::with_capacity((w as usize * h as usize) / 4); // rough capacity hint
-    {
-        let mut enc = JpegEncoder::new_with_quality(&mut out, 85);
-        // JPEG has no alpha; convert RGBA→RGB on the fly for fewer allocations.
-        let rgb = rgba_to_rgb(rgba);
-        enc.write_image(&rgb, w, h, ColorType::Rgb8.into())
-            .map_err(|e| ProtoError::new(ErrorCode::EncodeFailed, format!("jpeg encode: {e}")))?;
-    }
-    Ok(EncodedImage {
-        bytes: out,
-        mime: "image/jpeg",
+fn encode_jpeg(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ProtoError> {
+    // image 0.25's JpegEncoder requires Rgb8 input; drop alpha into a
+    // thread-local scratch (not per-call) to avoid the per-frame alloc.
+    RGB_SCRATCH.with(|rs| -> Result<Vec<u8>, ProtoError> {
+        let mut rgb = rs.borrow_mut();
+        rgba_to_rgb_into(rgba, &mut rgb);
+        OUT_SCRATCH.with(|s| {
+            let mut out = s.borrow_mut();
+            out.clear();
+            out.reserve((w as usize * h as usize) / 4);
+            {
+                let mut enc = JpegEncoder::new_with_quality(&mut *out, 85);
+                enc.write_image(&rgb, w, h, ColorType::Rgb8.into()).map_err(|e| {
+                    ProtoError::new(ErrorCode::EncodeFailed, format!("jpeg encode: {e}"))
+                })?;
+            }
+            Ok(std::mem::take(&mut *out))
+        })
     })
 }
 
-fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<EncodedImage, ProtoError> {
-    let mut out = Vec::with_capacity(rgba.len() / 2);
-    {
-        let enc = PngEncoder::new(&mut out);
-        enc.write_image(rgba, w, h, ColorType::Rgba8.into())
-            .map_err(|e| ProtoError::new(ErrorCode::EncodeFailed, format!("png encode: {e}")))?;
-    }
-    Ok(EncodedImage {
-        bytes: out,
-        mime: "image/png",
+fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ProtoError> {
+    OUT_SCRATCH.with(|s| {
+        let mut out = s.borrow_mut();
+        out.clear();
+        out.reserve(rgba.len() / 2);
+        {
+            let enc = PngEncoder::new(&mut *out);
+            enc.write_image(rgba, w, h, ColorType::Rgba8.into())
+                .map_err(|e| ProtoError::new(ErrorCode::EncodeFailed, format!("png encode: {e}")))?;
+        }
+        Ok(std::mem::take(&mut *out))
     })
 }
 
-fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+/// BGRA→RGBA pass into a caller-provided buffer, reused across calls.
+fn bgra_to_rgba_into(bgra: &[u8], out: &mut Vec<u8>) {
     debug_assert_eq!(bgra.len() % 4, 0);
-    let mut out = Vec::with_capacity(bgra.len());
+    out.clear();
+    out.reserve(bgra.len());
     for chunk in bgra.chunks_exact(4) {
         out.push(chunk[2]); // R
         out.push(chunk[1]); // G
         out.push(chunk[0]); // B
         out.push(chunk[3]); // A
     }
-    out
 }
 
-fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+/// RGBA→RGB pass into a caller-provided buffer, reused across calls.
+fn rgba_to_rgb_into(rgba: &[u8], out: &mut Vec<u8>) {
     debug_assert_eq!(rgba.len() % 4, 0);
-    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    out.clear();
+    out.reserve(rgba.len() / 4 * 3);
     for chunk in rgba.chunks_exact(4) {
         out.push(chunk[0]);
         out.push(chunk[1]);
         out.push(chunk[2]);
     }
-    out
 }
 
 #[cfg(test)]

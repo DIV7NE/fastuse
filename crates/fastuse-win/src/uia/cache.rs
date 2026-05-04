@@ -16,6 +16,16 @@
 //! is documented free-threaded. The cache stores cloned `UIElement` handles
 //! — they're refcounted COM proxies and are valid on the calling MTA pool
 //! worker. We never share an entry across non-MTA threads.
+//!
+//! WR-03 INVARIANT (must be upheld by every caller):
+//!   `UIElement` values surfaced from `lookup_fresh` / `get_or_fetch` may
+//!   only be touched on a thread that has performed `CoInitializeEx(MTA)`.
+//!   In practice this means inside a `pool.run(move |uia| …)` closure on
+//!   the UIA pool. Today every call site obeys this — we route through
+//!   `UiaPoolHandle::run` before dereferencing any cache hit. The
+//!   `unsafe impl Send for CacheEntry` below is justified by this invariant
+//!   alone; if you reach a cached `UIElement` from a non-MTA thread you
+//!   will trigger a COM apartment violation.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
