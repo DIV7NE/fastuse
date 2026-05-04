@@ -24,6 +24,22 @@ pub enum ErrorCode {
     ProtocolVersionMismatch,
     /// Catch-all for unexpected internal errors.
     Internal,
+    /// Confirmed-tier tool called without `--allow=<tool>` (Phase 4).
+    PermissionRequired,
+    /// Deny-list match or daemon-self-PID protection (Phase 4).
+    PermissionBlocked,
+    /// `shell_exec` exceeded its timeout (Phase 4).
+    ShellTimeout,
+    /// `shell_exec` output exceeded the 1 MiB cap (Phase 4).
+    ShellOutputTruncated,
+    /// `launch_app` could not resolve a query to any binary / AUMID / .lnk (Phase 4).
+    AppNotFound,
+    /// `kill_process` selector matched no running process (Phase 4).
+    ProcessNotFound,
+    /// `.lnk` resolution returned an empty target (shell-folder path) (Phase 4).
+    LnkResolutionFailed,
+    /// UWP AUMID activation returned non-S_OK (Phase 4).
+    AumidActivationFailed,
 }
 
 impl ErrorCode {
@@ -37,6 +53,14 @@ impl ErrorCode {
             Self::Timeout => "TIMEOUT",
             Self::ProtocolVersionMismatch => "PROTOCOL_VERSION_MISMATCH",
             Self::Internal => "INTERNAL",
+            Self::PermissionRequired => "PERMISSION_REQUIRED",
+            Self::PermissionBlocked => "PERMISSION_BLOCKED",
+            Self::ShellTimeout => "SHELL_TIMEOUT",
+            Self::ShellOutputTruncated => "SHELL_OUTPUT_TRUNCATED",
+            Self::AppNotFound => "APP_NOT_FOUND",
+            Self::ProcessNotFound => "PROCESS_NOT_FOUND",
+            Self::LnkResolutionFailed => "LNK_RESOLUTION_FAILED",
+            Self::AumidActivationFailed => "AUMID_ACTIVATION_FAILED",
         }
     }
 }
