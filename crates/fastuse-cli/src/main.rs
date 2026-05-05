@@ -6,6 +6,7 @@ mod cmd_phase2;
 mod cmd_phase3;
 mod cmd_phase4;
 mod cmd_ping;
+mod cmd_setup_mcp;
 mod cmd_start;
 mod cmd_status;
 mod cmd_stop;
@@ -182,6 +183,18 @@ enum Cmd {
         #[command(flatten)]
         opts: ActionOptsArgs,
     },
+    /// Wait for a window matching title/process to appear (polls up to --timeout-ms).
+    WaitForWindow {
+        /// Substring match against window title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Substring match against owning process name.
+        #[arg(long)]
+        process: Option<String>,
+        /// Poll timeout in milliseconds.
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u32,
+    },
     /// Move + resize a window.
     ResizeMoveWindow {
         /// HWND as decimal or 0x-prefixed hex.
@@ -330,6 +343,10 @@ enum Cmd {
     // ----- v2 computer subcommands (native pixel coords, no scale) -----
     /// computer_20251124-compatible actions with native virtual-desktop coords.
     Computer(ComputerArgs),
+
+    // ----- setup -----
+    /// Register fastuse-mcp.exe in Claude Code's settings.json (idempotent).
+    SetupMcp(SetupMcpArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -515,6 +532,17 @@ enum ComputerSubcmd {
     },
 }
 
+/// Arguments for `setup-mcp`.
+#[derive(clap::Args, Debug)]
+struct SetupMcpArgs {
+    /// Write to user-level (~/.claude/settings.json). Default when neither flag is given.
+    #[arg(long)]
+    user: bool,
+    /// Write to project-level (.claude/settings.json in cwd).
+    #[arg(long)]
+    project: bool,
+}
+
 #[derive(clap::Args, Debug, Clone, Default)]
 struct ActionOptsArgs {
     /// Selector JSON to poll for after the action.
@@ -641,6 +669,32 @@ fn main() {
                 let h = parse_hwnd(&hwnd)?;
                 let opts = build_action_opts(opts)?;
                 cmd_phase2::focus_window(&identity.path, h, opts).await
+            }
+            Cmd::WaitForWindow { title, process, timeout_ms } => {
+                use fastuse_proto::{wire::WaitForWindowRequest, Request as Req, Response};
+                use crate::proto_io::{read_response, write_request};
+                use crate::spawn::connect_or_spawn;
+                let req = Req::WaitForWindowV2(WaitForWindowRequest {
+                    title_substr: title,
+                    process_name: process,
+                    timeout_ms,
+                });
+                let mut pipe = connect_or_spawn(&identity.path).await?;
+                write_request(&mut pipe, &Req::Hello {
+                    client_kind: "cli".into(),
+                    client_version: env!("CARGO_PKG_VERSION").into(),
+                    requested_idle_timeout_secs: None,
+                }).await?;
+                let _ = read_response(&mut pipe).await?;
+                write_request(&mut pipe, &req).await?;
+                match read_response(&mut pipe).await? {
+                    Response::Window(w) => {
+                        println!("{}", serde_json::to_string(&w)?);
+                        Ok(())
+                    }
+                    Response::Error(e) => anyhow::bail!("{}", e.message),
+                    other => anyhow::bail!("unexpected: {other:?}"),
+                }
             }
             Cmd::ResizeMoveWindow { hwnd, x, y, w, h, opts } => {
                 let hw = parse_hwnd(&hwnd)?;
@@ -776,6 +830,9 @@ fn main() {
                     }
                 }
             }
+
+            // ---- setup-mcp ----
+            Cmd::SetupMcp(args) => cmd_setup_mcp::run(args.user, args.project),
 
             // ---- Bench ----
             Cmd::Bench { kind } => match kind {
