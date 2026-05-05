@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::capture_thread::CaptureThreadHandle;
 use crate::ocr_thread::OcrThreadHandle;
 
+use windows::core::Interface;
+use windows::Graphics::Imaging::{
+    BitmapAlphaMode, BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap,
+};
+use windows::Win32::System::WinRT::IMemoryBufferByteAccess;
+use windows_future::AsyncStatus;
+
 /// One OCR match.
 ///
 /// `text` is wrapped in `Redact<String>` per the spec's "Open invariants" —
@@ -39,7 +46,7 @@ pub async fn ocr_cropped_progressive(
 ) -> Vec<OcrHit> {
     // Capture pixels for the region. Reuses the existing
     // capture_thread::run_screenshot_region API.
-    let pixels = match capture
+    let captured = match capture
         .run(move || Ok::<_, fastuse_proto::Error>(capture_region_pixels(region)))
         .ok()
         .flatten()
@@ -47,6 +54,7 @@ pub async fn ocr_cropped_progressive(
         Some(p) => p,
         None => return Vec::new(),
     };
+    let (pixels, captured_w, captured_h) = captured;
 
     let frame_hash = super::cache::frame_hash(&pixels);
     let key = super::cache::OcrCacheKey {
@@ -57,8 +65,8 @@ pub async fn ocr_cropped_progressive(
         Some(h) => h,
         None => {
             // OCR pass on the dedicated thread.
-            let pixels_w = region.w;
-            let pixels_h = region.h;
+            let pixels_w = captured_w;
+            let pixels_h = captured_h;
             let pixels_owned = pixels.clone();
             let raw_hits = ocr
                 .run(move || run_ocr_on_pixels(&pixels_owned, pixels_w, pixels_h))
@@ -90,26 +98,191 @@ pub async fn ocr_cropped_progressive(
     hits
 }
 
-fn capture_region_pixels(_region: Rect) -> Option<Vec<u8>> {
-    // Implementer: thread the existing capture_thread DXGI duplication
-    // staging-texture path; copy out the cropped sub-rect as BGRA bytes.
-    // The capture thread already has a region-aware screenshot routine
-    // for the `Request::ScreenshotRegion` arm — call it directly.
-    None
+/// Capture the requested region as raw BGRA bytes. Runs ON the capture
+/// thread (caller dispatches via `CaptureThreadHandle::run`), reusing the
+/// cached `IDXGIOutputDuplication` and staging texture from
+/// `crate::capture::dxgi`. CAP-02: no reacquisition.
+///
+/// Returns `(pixels, w, h)`. The captured `w`/`h` may be smaller than
+/// `region.w`/`region.h` after monitor-edge clamping; downstream OCR keys
+/// off the actual buffer size.
+fn capture_region_pixels(region: Rect) -> Option<(Vec<u8>, i32, i32)> {
+    // Monitor 0 — matches Phase 3 screenshot defaults. Multi-monitor
+    // dispatching is a v1.1 concern; the dxgi path translates virtual-
+    // desktop coords to monitor-local internally.
+    match crate::capture::capture_into_staging(0, Some(region)) {
+        Ok(buf) => Some((buf.bgra, buf.w as i32, buf.h as i32)),
+        Err(e) => {
+            tracing::debug!(error = ?e, "capture_region_pixels failed");
+            None
+        }
+    }
 }
 
-fn run_ocr_on_pixels(_pixels: &[u8], _w: i32, _h: i32) -> Vec<OcrHit> {
-    // Implementer: build a SoftwareBitmap from the BGRA pixel buffer
-    // (BitmapPixelFormat::Bgra8, BitmapAlphaMode::Premultiplied), then
-    // engine.RecognizeAsync(bitmap).get(). Iterate `OcrResult.Lines()` →
-    // `OcrLine.Words()` (or build per-line bounding boxes by unioning
-    // word rects), fill OcrHit entries.
-    //
-    // Bounds returned by Windows.Media.Ocr are in dips at the source
-    // bitmap's resolution — for cropped captures, that means region-local
-    // physical pixels (no further DPI math needed because we capture
-    // physical-pixel buffers).
-    Vec::new()
+/// Run Windows.Media.Ocr over the BGRA pixel buffer. Runs ON the OCR thread
+/// (caller dispatches via `OcrThreadHandle::run`); the cached `OcrEngine`
+/// from `ocr_thread::ocr_engine` is reused.
+///
+/// One `OcrHit` is emitted per recognized **line** (word rects unioned).
+/// Bounds are in region-local physical pixels — caller translates to
+/// virtual-desktop coordinates. Confidence is fixed at 0.85 (the hybrid
+/// scorer's OCR ceiling); per-word/-line confidence is not exposed by
+/// `OcrEngine`. Empty `Vec` on any failure (no language pack, empty input,
+/// engine error) — OCR is best-effort by design.
+fn run_ocr_on_pixels(pixels: &[u8], w: i32, h: i32) -> Vec<OcrHit> {
+    if w <= 0 || h <= 0 || pixels.is_empty() {
+        return Vec::new();
+    }
+    let expected = (w as usize) * (h as usize) * 4;
+    if pixels.len() < expected {
+        tracing::debug!(
+            got = pixels.len(),
+            expected,
+            "run_ocr_on_pixels: pixel buffer shorter than w*h*4; aborting"
+        );
+        return Vec::new();
+    }
+
+    let engine = match crate::ocr_thread::ocr_engine().and_then(|s| s.engine().cloned()) {
+        Some(e) => e,
+        None => {
+            tracing::debug!("run_ocr_on_pixels: no OcrEngine (no language packs?)");
+            return Vec::new();
+        }
+    };
+
+    let bitmap = match build_bgra_bitmap(pixels, w, h) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!(error = ?e, "run_ocr_on_pixels: SoftwareBitmap build failed");
+            return Vec::new();
+        }
+    };
+
+    // RecognizeAsync. We are the dedicated OCR thread; spin-wait on Status()
+    // is acceptable (no other work pending on this thread). The `Async` trait
+    // helper from `windows-future` is private, so we drive completion manually.
+    let async_op = match engine.RecognizeAsync(&bitmap) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!(error = ?e, "RecognizeAsync failed");
+            return Vec::new();
+        }
+    };
+    // Bounded poll loop: 5 s ceiling (typical OCR pass is 30-150 ms).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match async_op.Status() {
+            Ok(s) if s != AsyncStatus::Started => break,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(error = ?e, "RecognizeAsync.Status failed");
+                return Vec::new();
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::debug!("RecognizeAsync exceeded 5s deadline");
+            return Vec::new();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let result = match async_op.GetResults() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(error = ?e, "RecognizeAsync.GetResults failed");
+            return Vec::new();
+        }
+    };
+
+    let lines = match result.Lines() {
+        Ok(l) => l,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut hits = Vec::new();
+    for line in &lines {
+        let words = match line.Words() {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+
+        // Union of all word bounding rects -> per-line bounding box.
+        let mut union: Option<(f32, f32, f32, f32)> = None;
+        for word in &words {
+            let r = match word.BoundingRect() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let (x1, y1, x2, y2) = (r.X, r.Y, r.X + r.Width, r.Y + r.Height);
+            union = Some(match union {
+                None => (x1, y1, x2, y2),
+                Some((ax1, ay1, ax2, ay2)) => {
+                    (ax1.min(x1), ay1.min(y1), ax2.max(x2), ay2.max(y2))
+                }
+            });
+        }
+        let bounds = match union {
+            Some((x1, y1, x2, y2)) => Rect {
+                x: x1.floor() as i32,
+                y: y1.floor() as i32,
+                w: (x2 - x1).ceil().max(0.0) as i32,
+                h: (y2 - y1).ceil().max(0.0) as i32,
+            },
+            None => continue, // line with no words; skip
+        };
+
+        let text = match line.Text() {
+            Ok(t) => t.to_string_lossy(),
+            Err(_) => continue,
+        };
+        if text.is_empty() {
+            continue;
+        }
+
+        hits.push(OcrHit {
+            text: Redact::new(text),
+            bounds,
+            confidence: 0.85,
+        });
+    }
+    hits
+}
+
+/// Construct a `SoftwareBitmap` (BGRA8, Premultiplied alpha) from a tight
+/// row-pitch BGRA buffer. Uses `IMemoryBufferByteAccess::GetBuffer` to
+/// memcpy bytes into the bitmap's backing store — the windows-rs pattern
+/// recommended by Microsoft samples.
+fn build_bgra_bitmap(
+    pixels: &[u8],
+    w: i32,
+    h: i32,
+) -> windows::core::Result<SoftwareBitmap> {
+    let bitmap = SoftwareBitmap::CreateWithAlpha(
+        BitmapPixelFormat::Bgra8,
+        w,
+        h,
+        BitmapAlphaMode::Premultiplied,
+    )?;
+    let buffer = bitmap.LockBuffer(BitmapBufferAccessMode::Write)?;
+    let reference = buffer.CreateReference()?;
+    let byte_access: IMemoryBufferByteAccess = reference.cast()?;
+
+    // SAFETY: GetBuffer returns a pointer to capacity bytes of the bitmap
+    // backing store; copying `min(pixels.len(), capacity)` bytes is safe.
+    // The bitmap, buffer, and reference are kept alive across the copy.
+    unsafe {
+        let mut ptr: *mut u8 = std::ptr::null_mut();
+        let mut capacity: u32 = 0;
+        byte_access.GetBuffer(&mut ptr, &mut capacity)?;
+        if !ptr.is_null() {
+            let n = std::cmp::min(pixels.len(), capacity as usize);
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), ptr, n);
+        }
+    }
+
+    drop(reference);
+    drop(buffer);
+    Ok(bitmap)
 }
 
 #[cfg(test)]

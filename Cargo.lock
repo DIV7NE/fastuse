@@ -488,6 +488,7 @@ dependencies = [
  "uiautomation",
  "windows",
  "windows-core",
+ "windows-future",
 ]
 
 [[package]]
