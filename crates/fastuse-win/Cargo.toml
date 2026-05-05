@@ -48,6 +48,9 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
 ] }
 windows-core = { workspace = true }
 uiautomation = { workspace = true }

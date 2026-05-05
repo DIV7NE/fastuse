@@ -1,6 +1,20 @@
 //! Verify no `tokio::spawn(...)` body or `#[tokio::main]` async fn body
 //! contains a `windows::*` or `uiautomation::*` path reference.
 //!
+//! # Allowed MTA / STA COM-thread hosts (D-25)
+//!
+//! `fastuse-win` is excluded from this scan by crate filter (see `run`).
+//! Inside that crate, the only modules permitted to host a dedicated COM
+//! thread (and therefore the only ones permitted to call into `windows::*`
+//! activation factories on a non-tokio thread) are:
+//!
+//! - `input_thread` — STA, hosts SendInput synthesis
+//! - `uia_pool` — MTA worker pool, hosts `IUIAutomation` queries
+//! - `capture_thread` — MTA, hosts D3D11 + DXGI desktop duplication
+//! - `ocr_thread` — MTA, hosts `Windows.Media.Ocr::OcrEngine`
+//!
+//! Adding a fifth COM-thread surface requires extending this list.
+//!
 //! # Known limits (WR-08)
 //!
 //! This lint is intentionally heuristic. Reviewers should not trust it
