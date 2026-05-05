@@ -18,8 +18,8 @@ pub mod verify;
 pub use candidate::{GeometrySource, PatternSet, TargetCandidate};
 pub use execute::{execute_targeted, TargetedRequest};
 pub use profile::{
-    invalidate_profile_cache, profile_window, IntegrityLevel, ProfileCacheKey, TargetProfile,
-    TreeQuality, WindowSignals,
+    invalidate_profile_cache, profile_window, profile_window_for_selector, IntegrityLevel,
+    ProfileCacheKey, TargetProfile, TreeQuality, WindowSignals,
 };
 pub use strategy::pick_strategy;
 pub use verify::{poll_until, VerifyOutcome};

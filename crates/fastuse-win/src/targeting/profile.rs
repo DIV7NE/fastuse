@@ -131,8 +131,8 @@ pub fn profile_window(
 
     // Run the probe on the UIA pool — D-25 invariant.
     let signals = uia
-        .run(move |_uia| {
-            probe_on_uia_thread(hwnd).map_err(|e| {
+        .run(move |automation| {
+            probe_on_uia_thread(automation, hwnd).map_err(|e| {
                 fastuse_proto::Error::new(
                     fastuse_proto::ErrorCode::Internal,
                     format!("profile probe: {e}"),
@@ -180,7 +180,10 @@ fn process_start_time(pid: u32) -> Option<u64> {
 
 /// Runs on the UIA pool MTA worker. All `windows::*` and `uiautomation::*`
 /// calls happen here.
-fn probe_on_uia_thread(hwnd: u64) -> Result<WindowSignals, ProfileError> {
+fn probe_on_uia_thread(
+    automation: &uiautomation::UIAutomation,
+    hwnd: u64,
+) -> Result<WindowSignals, ProfileError> {
     use windows::Win32::Foundation::HWND;
     let h = HWND(hwnd as *mut _);
     let window_class = read_class_name(h);
@@ -190,8 +193,8 @@ fn probe_on_uia_thread(hwnd: u64) -> Result<WindowSignals, ProfileError> {
     let occluded = false; // detailed handling deferred to v1.1
     let dwm_extended_frame_bounds = read_dwm_extended_frame(h);
     let is_foreground = read_foreground(h);
-    let framework_id = read_framework_id(h);
-    let uia_tree_quality = probe_tree_quality(h);
+    let framework_id = read_framework_id_uia(automation, hwnd);
+    let uia_tree_quality = probe_tree_quality_uia(automation, hwnd);
     let integrity_level = read_integrity_level(h);
 
     Ok(WindowSignals {
@@ -299,19 +302,124 @@ fn read_foreground(h: windows::Win32::Foundation::HWND) -> bool {
     fg == h
 }
 
-fn read_framework_id(_h: windows::Win32::Foundation::HWND) -> Option<String> {
-    // Read via uiautomation 0.24 — `UIElement::get_framework_id` returns
-    // BSTR. Done in `probe_on_uia_thread` context via the uia_pool's
-    // CUIAutomation singleton; needs the singleton accessor exposed by
-    // crates/fastuse-win/src/uia_pool.rs. Wire in Task 4 alongside
-    // candidate resolution since both use the same singleton.
-    None
+fn read_framework_id_uia(
+    automation: &uiautomation::UIAutomation,
+    hwnd: u64,
+) -> Option<String> {
+    use uiautomation::types::{Handle, UIProperty};
+    use windows::Win32::Foundation::HWND;
+
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    let element = automation.element_from_handle(Handle::from(h)).ok()?;
+    let req = automation.create_cache_request().ok()?;
+    req.add_property(UIProperty::FrameworkId).ok()?;
+    let cached = element.build_updated_cache(&req).ok()?;
+    let id = cached.get_cached_framework_id().ok()?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
-fn probe_tree_quality(_h: windows::Win32::Foundation::HWND) -> TreeQuality {
-    // Heuristic — wire in Task 4 alongside candidate resolution. For now,
-    // assume Healthy; the Task-3 commit ships signals only.
-    TreeQuality::Healthy
+/// Two-level UIA tree heuristic. Counts nodes at depth ≤ 2 with non-empty
+/// Name OR non-empty AutomationId OR non-Pane ControlType. Falls open to
+/// `Healthy` on any cache-fetch failure — better to act and let the
+/// hit-test gate (Task 6) reject than to over-report Degraded.
+fn probe_tree_quality_uia(
+    automation: &uiautomation::UIAutomation,
+    hwnd: u64,
+) -> TreeQuality {
+    use uiautomation::types::{ControlType as U, Handle, TreeScope, UIProperty};
+    use windows::Win32::Foundation::HWND;
+
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    let element = match automation.element_from_handle(Handle::from(h)) {
+        Ok(e) => e,
+        Err(_) => return TreeQuality::Healthy,
+    };
+    let req = match automation.create_cache_request() {
+        Ok(r) => r,
+        Err(_) => return TreeQuality::Healthy,
+    };
+    for p in [
+        UIProperty::Name,
+        UIProperty::AutomationId,
+        UIProperty::ControlType,
+    ] {
+        if req.add_property(p).is_err() {
+            return TreeQuality::Healthy;
+        }
+    }
+    if req.set_tree_scope(TreeScope::Subtree).is_err() {
+        return TreeQuality::Healthy;
+    }
+    let cond = match automation.create_true_condition() {
+        Ok(c) => c,
+        Err(_) => return TreeQuality::Healthy,
+    };
+    if req.set_tree_filter(cond).is_err() {
+        return TreeQuality::Healthy;
+    }
+    let cached_root = match element.build_updated_cache(&req) {
+        Ok(r) => r,
+        Err(_) => return TreeQuality::Healthy,
+    };
+
+    fn walk(
+        el: &uiautomation::UIElement,
+        depth_left: u32,
+        total: &mut u32,
+        named_or_id: &mut u32,
+    ) {
+        *total += 1;
+        let name = el.get_cached_name().unwrap_or_default();
+        let aid = el.get_cached_automation_id().unwrap_or_default();
+        let ct = el.get_cached_control_type().ok();
+        let is_named_or_id = !name.is_empty() || !aid.is_empty();
+        let is_non_pane = ct.map(|c| !matches!(c, U::Pane)).unwrap_or(false);
+        if is_named_or_id || is_non_pane {
+            *named_or_id += 1;
+        }
+        if depth_left == 0 {
+            return;
+        }
+        if let Ok(kids) = el.get_cached_children() {
+            for k in &kids {
+                walk(k, depth_left - 1, total, named_or_id);
+            }
+        }
+    }
+    let mut total: u32 = 0;
+    let mut named_or_id: u32 = 0;
+    walk(&cached_root, 2, &mut total, &mut named_or_id);
+
+    if total <= 2 {
+        return TreeQuality::Degraded;
+    }
+    let ratio = named_or_id as f32 / total as f32;
+    if ratio < 0.15 {
+        TreeQuality::Degraded
+    } else if ratio < 0.40 {
+        TreeQuality::Mixed
+    } else {
+        TreeQuality::Healthy
+    }
+}
+
+/// Build a full `TargetProfile` for `hwnd` against `selector`. Composes
+/// `profile_window` (signals, cached) with `resolve_candidates` (per-call;
+/// candidate identity is selector-dependent so it's not cached at the
+/// profile level).
+pub fn profile_window_for_selector(
+    hwnd: u64,
+    selector: &fastuse_proto::Selector,
+    uia: &Arc<UiaPoolHandle>,
+) -> Result<TargetProfile, ProfileError> {
+    let mut profile = profile_window(hwnd, uia)?;
+    let candidates = crate::targeting::candidate::resolve_candidates(hwnd, selector, uia);
+    profile.candidates = candidates;
+    Ok(profile)
 }
 
 fn read_integrity_level(h: windows::Win32::Foundation::HWND) -> IntegrityLevel {
