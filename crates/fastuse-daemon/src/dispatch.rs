@@ -45,6 +45,7 @@ use fastuse_win::uia_pool::UiaPoolHandle;
 use fastuse_win::window::{
     cursor_position::cursor_position, focus::focus_window, foreground::foreground_window,
     list_windows::list_windows, monitors::list_monitors, move_resize::resize_move_window,
+    wait_for_window::wait_for_window,
 };
 
 use crate::session::Session;
@@ -413,10 +414,26 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             win32_us = w_start.elapsed().as_micros() as i64;
             r
         }
-        Request::WaitForWindowV2(_) => Response::Error(Error::new(
-            ErrorCode::Internal,
-            "dispatch wired in Task 11".to_string(),
-        )),
+        Request::WaitForWindowV2(req) => {
+            let w_start = Instant::now();
+            let result = wait_for_window(&req);
+            win32_us = w_start.elapsed().as_micros() as i64;
+            match result {
+                Some(info) => Response::Window(info),
+                None => Response::Error(
+                    Error::new(
+                        ErrorCode::WindowNotFound,
+                        format!(
+                            "no window matching title={:?} process={:?} appeared within {}ms",
+                            req.title_substr, req.process_name, req.timeout_ms
+                        ),
+                    )
+                    .with_hint(
+                        "increase timeout_ms or verify the process name/title substring",
+                    ),
+                ),
+            }
+        }
     };
 
     DispatchResult {
