@@ -167,6 +167,23 @@ pub(crate) fn resolve_on_uia_thread(
             return Vec::new();
         }
     }
+    // Pull the pattern objects into the cache so `get_cached_pattern::<X>()`
+    // can answer availability without a live COM round-trip per element.
+    use uiautomation::patterns::UIPatternType;
+    let pats = [
+        UIPatternType::Invoke,
+        UIPatternType::Toggle,
+        UIPatternType::SelectionItem,
+        UIPatternType::ExpandCollapse,
+        UIPatternType::Value,
+        UIPatternType::LegacyIAccessible,
+        UIPatternType::ScrollItem,
+    ];
+    for p in pats {
+        if req.add_pattern(p).is_err() {
+            return Vec::new();
+        }
+    }
     if req.set_tree_scope(TreeScope::Subtree).is_err() {
         return Vec::new();
     }
@@ -250,20 +267,27 @@ fn candidate_from_element(el: &uiautomation::UIElement) -> Option<TargetCandidat
     let is_offscreen = el.is_cached_offscreen().unwrap_or(false);
     let runtime_id = el.get_runtime_id().unwrap_or_default();
 
-    let read_bool = |p: UIProperty| -> bool {
-        el.get_cached_property_value(p)
-            .ok()
-            .and_then(|v| TryInto::<bool>::try_into(v).ok())
-            .unwrap_or(false)
+    // uiautomation 0.24's `Variant::try_into::<bool>` does not cover the VT_BOOL
+    // representation UIA returns for `Is{Pattern}PatternAvailable` properties —
+    // every read came back `false`, sending `pick_strategy` down the
+    // `BoundsClickUia` fallback even for buttons that clearly expose Invoke.
+    // Read availability via the cached pattern itself instead: the patterns are
+    // pre-fetched into the CacheRequest above, so `get_cached_pattern::<X>()`
+    // is a cheap cache hit that returns Ok iff the element exposes the pattern.
+    use uiautomation::patterns::{
+        UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollItemPattern,
+        UISelectionItemPattern, UITogglePattern, UIValuePattern,
     };
     let patterns = PatternSet {
-        invoke: read_bool(UIProperty::IsInvokePatternAvailable),
-        toggle: read_bool(UIProperty::IsTogglePatternAvailable),
-        selection_item: read_bool(UIProperty::IsSelectionItemPatternAvailable),
-        expand_collapse: read_bool(UIProperty::IsExpandCollapsePatternAvailable),
-        value: read_bool(UIProperty::IsValuePatternAvailable),
-        legacy_iaccessible: read_bool(UIProperty::IsLegacyIAccessiblePatternAvailable),
-        scroll_item: read_bool(UIProperty::IsScrollItemPatternAvailable),
+        invoke: el.get_cached_pattern::<UIInvokePattern>().is_ok(),
+        toggle: el.get_cached_pattern::<UITogglePattern>().is_ok(),
+        selection_item: el.get_cached_pattern::<UISelectionItemPattern>().is_ok(),
+        expand_collapse: el.get_cached_pattern::<UIExpandCollapsePattern>().is_ok(),
+        value: el.get_cached_pattern::<UIValuePattern>().is_ok(),
+        legacy_iaccessible: el
+            .get_cached_pattern::<UILegacyIAccessiblePattern>()
+            .is_ok(),
+        scroll_item: el.get_cached_pattern::<UIScrollItemPattern>().is_ok(),
     };
 
     Some(TargetCandidate::Uia {
