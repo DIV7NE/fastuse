@@ -1,14 +1,17 @@
-//! SendInput-backed implementation of [`InputBackend`]. v1: pure dispatch, no
-//! humanization (Bezier curves and timing jitter ship in the next task).
+//! SendInput-backed implementation of [`InputBackend`]. Honors
+//! [`MotionProfile::humanize`] and [`TypingProfile::humanize`] to apply
+//! Bezier-curve interpolation and per-keystroke timing jitter when enabled.
 
 use crate::input::backend::{
     Capabilities, InputAction, InputBackend, InputError,
 };
 
-/// [`InputBackend`] that delegates every action directly to Win32 `SendInput`.
+/// [`InputBackend`] that delegates every action to Win32 `SendInput`.
 ///
-/// Humanization (Bezier motion, keystroke jitter) is not applied at this
-/// stage — that arrives in Task 4 via the humanize layer.
+/// When `profile.humanize` is `true`, mouse movement uses cubic Bezier
+/// interpolation at ~60Hz and typing applies per-keystroke normal-distribution
+/// intervals via [`crate::input::humanize`]. When `false`, actions fall
+/// through to a single `SendInput` call.
 pub struct SendInputBackend;
 
 impl SendInputBackend {
@@ -22,8 +25,27 @@ impl InputBackend for SendInputBackend {
         use crate::input::backend::{InputAction::*, MouseButton, ScrollDirection};
 
         match action {
-            MouseMove { to, .. } => si::mouse_move_absolute(to.x, to.y)
-                .map_err(|e| InputError::Dispatch(e.to_string())),
+            MouseMove { from, to, profile } => {
+                if profile.humanize {
+                    use crate::input::humanize::{bezier_path, sample_count, motion_duration_ms};
+                    let dx = (to.x - from.x) as f32;
+                    let dy = (to.y - from.y) as f32;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let dur = profile.duration_ms.unwrap_or_else(|| motion_duration_ms(dist));
+                    let n = sample_count(dist, dur);
+                    let path = bezier_path(from, to, n, profile.jitter);
+                    let step = std::time::Duration::from_millis(dur as u64 / n as u64);
+                    for p in path {
+                        si::mouse_move_absolute(p.x, p.y)
+                            .map_err(|e| InputError::Dispatch(e.to_string()))?;
+                        std::thread::sleep(step);
+                    }
+                    Ok(())
+                } else {
+                    si::mouse_move_absolute(to.x, to.y)
+                        .map_err(|e| InputError::Dispatch(e.to_string()))
+                }
+            }
             MouseClick { at, button, count, modifiers, .. } => {
                 si::mouse_move_absolute(at.x, at.y)
                     .map_err(|e| InputError::Dispatch(e.to_string()))?;
@@ -55,23 +77,52 @@ impl InputBackend for SendInputBackend {
                 };
                 si::mouse_up(btn).map_err(|e| InputError::Dispatch(e.to_string()))
             }
-            Drag { from, to, button, modifiers, .. } => {
-                si::mouse_move_absolute(from.x, from.y)
-                    .map_err(|e| InputError::Dispatch(e.to_string()))?;
+            Drag { from, to, button, profile, modifiers } => {
                 let btn = match button {
                     MouseButton::Left => si::Button::Left,
                     MouseButton::Right => si::Button::Right,
                     MouseButton::Middle => si::Button::Middle,
                 };
-                si::mouse_down(btn).map_err(|e| InputError::Dispatch(e.to_string()))?;
-                si::mouse_move_absolute(to.x, to.y)
+                si::mouse_move_absolute(from.x, from.y)
                     .map_err(|e| InputError::Dispatch(e.to_string()))?;
+                si::mouse_down(btn).map_err(|e| InputError::Dispatch(e.to_string()))?;
+                if profile.humanize {
+                    use crate::input::humanize::{bezier_path, sample_count, motion_duration_ms};
+                    let dx = (to.x - from.x) as f32;
+                    let dy = (to.y - from.y) as f32;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let dur = profile.duration_ms.unwrap_or_else(|| motion_duration_ms(dist));
+                    let n = sample_count(dist, dur);
+                    let path = bezier_path(from, to, n, profile.jitter);
+                    let step = std::time::Duration::from_millis(dur as u64 / n as u64);
+                    for p in path {
+                        si::mouse_move_absolute(p.x, p.y)
+                            .map_err(|e| InputError::Dispatch(e.to_string()))?;
+                        std::thread::sleep(step);
+                    }
+                } else {
+                    si::mouse_move_absolute(to.x, to.y)
+                        .map_err(|e| InputError::Dispatch(e.to_string()))?;
+                }
                 si::mouse_up(btn).map_err(|e| InputError::Dispatch(e.to_string()))?;
                 let _ = modifiers;
                 Ok(())
             }
-            KeyType { text, .. } => si::type_text(&text)
-                .map_err(|e| InputError::Dispatch(e.to_string())),
+            KeyType { text, profile } => {
+                if profile.humanize {
+                    use crate::input::humanize::typing_intervals;
+                    let chars: Vec<char> = text.chars().collect();
+                    let intervals = typing_intervals(chars.len(), profile.mean_interval_ms, profile.interval_stddev_ms);
+                    for (ch, iv) in chars.iter().zip(intervals.iter()) {
+                        si::type_text(&ch.to_string())
+                            .map_err(|e| InputError::Dispatch(e.to_string()))?;
+                        std::thread::sleep(std::time::Duration::from_millis(*iv as u64));
+                    }
+                    Ok(())
+                } else {
+                    si::type_text(&text).map_err(|e| InputError::Dispatch(e.to_string()))
+                }
+            }
             KeyChord { keys, hold_ms } => si::key_chord(&keys, hold_ms)
                 .map_err(|e| InputError::Dispatch(e.to_string())),
             Scroll { at, direction, amount } => {
@@ -91,12 +142,37 @@ impl InputBackend for SendInputBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            humanized_motion: false,  // bumped to true in next task
-            humanized_typing: false,
+            humanized_motion: true,
+            humanized_typing: true,
             modifier_drags: true,
             gamepad: false,
         }
     }
 
     fn name(&self) -> &'static str { "sendinput" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::backend::{InputAction, MotionProfile, Point};
+
+    #[test]
+    fn humanized_mouse_move_uses_bezier_path() {
+        // Sanity check on the path itself (backend-side tests can't hit real
+        // SendInput in unit context). Verify the path generator produces
+        // non-trivial intermediate points.
+        use crate::input::humanize::bezier_path;
+        let path = bezier_path(Point { x: 0, y: 0 }, Point { x: 200, y: 200 }, 12, 0.0);
+        assert_eq!(path.len(), 12);
+        assert_ne!(path[6], Point { x: 100, y: 100 }); // curved, not straight-line midpoint
+    }
+
+    #[test]
+    fn capabilities_reports_humanized() {
+        let b = SendInputBackend::new();
+        let caps = b.capabilities();
+        assert!(caps.humanized_motion);
+        assert!(caps.humanized_typing);
+    }
 }
