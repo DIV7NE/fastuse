@@ -1,11 +1,16 @@
-//! rmcp 1.6 ServerHandler exposing the Phase 1 `ping` + Phase 2 input/window
-//! tools.
+//! rmcp 1.6 ServerHandler exposing all fastuse v2 MCP tools.
+//!
+//! All `#[tool]` methods live on this single `Fastuse` impl because
+//! `#[tool_router(server_handler)]` requires a single type as the registration
+//! target.  The sub-modules in `crate::tools` (`windows`, `inspection`,
+//! `meta`) are documentation hubs that cross-reference the methods here — see
+//! Task 16 commit for the architecture rationale.
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fastuse_proto::{
     coords::{MonitorInfo, MouseButton, ScrollDirection, WindowInfo},
-    wire::{ComputerAction, ComputerRequest},
+    wire::{ComputerAction, ComputerRequest, WaitForWindowRequest},
     Redact, Request, Response,
 };
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -520,6 +525,20 @@ pub struct ClipboardSetImageArgs {
     pub data_b64: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WaitForWindowArgs {
+    /// Substring to match against window title. At least one of title_substr
+    /// or process_name must be provided.
+    pub title_substr: Option<String>,
+    /// Substring to match against owning process name.
+    pub process_name: Option<String>,
+    /// Maximum poll time in milliseconds. Defaults to 5000.
+    #[serde(default = "default_wait_timeout")]
+    pub timeout_ms: u32,
+}
+
+fn default_wait_timeout() -> u32 { 5000 }
+
 // ---------- Phase 4 output schemas ----------
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -564,6 +583,20 @@ pub struct ProcessInfoOutput {
     pub name: String,
     pub exe_path: Option<String>,
     pub main_hwnd: Option<isize>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct StatusOutput {
+    pub running: bool,
+    pub daemon_pid: Option<u32>,
+    pub session_id: Option<u32>,
+    pub rtt_us: Option<u64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct StopOutput {
+    pub ok: bool,
+    pub was_running: bool,
 }
 
 fn parse_shell_kind(s: Option<&str>) -> Option<fastuse_proto::ShellKind> {
@@ -769,7 +802,7 @@ impl Fastuse {
         }
     }
 
-    #[tool(name = "list_windows", description = "Enumerate top-level windows with optional process_name and title_substring filters. 250ms TTL cache.")]
+    #[tool(name = "list_windows", description = "List visible top-level Windows windows. Filter by title substring or process name. Returns hwnd, bounds, title, process name.")]
     async fn list_windows(&self, Parameters(args): Parameters<ListWindowsArgs>) -> Result<Json<Vec<WindowInfo>>, McpError> {
         let req = Request::ListWindows {
             process_name: args.process_name,
@@ -848,7 +881,7 @@ impl Fastuse {
         }
     }
 
-    #[tool(name = "inspect_at_point", description = "Inspect the single UIA element under a screen point.")]
+    #[tool(name = "inspect_at", description = "Read the UIA element under the given pixel. Read-only — does not click. Returns control_type, name, automation_id, bounds. Useful for grounding before deciding where to click.")]
     async fn inspect_at_point(&self, Parameters(args): Parameters<InspectAtPointArgs>) -> Result<Json<InspectOutput>, McpError> {
         let req = Request::InspectAtPoint { x: args.x, y: args.y };
         match self.call(req).await? {
@@ -1028,6 +1061,54 @@ impl Fastuse {
             }
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- wait_for_window ----
+    #[tool(name = "wait_for_window", description = "Poll for a window matching the predicate, returns when found or after timeout_ms. At least one of title_substr or process_name is required.")]
+    async fn wait_for_window(&self, Parameters(args): Parameters<WaitForWindowArgs>) -> Result<Json<WindowInfo>, McpError> {
+        let req = Request::WaitForWindowV2(WaitForWindowRequest {
+            title_substr: args.title_substr,
+            process_name: args.process_name,
+            timeout_ms: args.timeout_ms,
+        });
+        match self.call(req).await? {
+            Response::Window(w) => Ok(Json(w)),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- meta: status / stop ----
+
+    #[tool(name = "status", description = "Return daemon health: whether it is running, its PID, session ID, and last ping RTT in microseconds.")]
+    async fn status(&self) -> Result<Json<StatusOutput>, McpError> {
+        let now_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| McpError::internal_error(format!("clock: {e}"), None))?
+            .as_micros() as u64;
+        let send = Instant::now();
+        match self.call(Request::Ping { ts_us: now_us }).await {
+            Ok(Response::Pong { daemon_pid, session_id, .. }) => Ok(Json(StatusOutput {
+                running: true,
+                daemon_pid: Some(daemon_pid),
+                session_id: Some(session_id),
+                rtt_us: Some(send.elapsed().as_micros() as u64),
+            })),
+            _ => Ok(Json(StatusOutput {
+                running: false,
+                daemon_pid: None,
+                session_id: None,
+                rtt_us: None,
+            })),
+        }
+    }
+
+    #[tool(name = "stop", description = "Gracefully shut down the fastuse daemon. Idempotent — returns ok=true even if the daemon was not running.")]
+    async fn stop(&self) -> Result<Json<StopOutput>, McpError> {
+        match self.call(Request::Shutdown).await {
+            Ok(_) => Ok(Json(StopOutput { ok: true, was_running: true })),
+            Err(_) => Ok(Json(StopOutput { ok: true, was_running: false })),
         }
     }
 
