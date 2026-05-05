@@ -8,7 +8,9 @@ publish.workspace = true
 [dependencies]
 fastuse-proto = { path = "../fastuse-proto" }
 thiserror = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = "0.8"
+tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
