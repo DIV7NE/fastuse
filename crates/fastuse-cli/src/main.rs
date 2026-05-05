@@ -281,6 +281,28 @@ enum Cmd {
         #[command(flatten)]
         opts: ActionOptsArgs,
     },
+    /// Resolve a UIA selector to an element and click its centroid. Thin
+    /// helper over `uia-query` + `click X Y` — does NOT do v1's smart
+    /// targeting ladder. For adversarial apps, use vision (screenshot +
+    /// computer left-click) instead.
+    ClickElement {
+        /// Selector JSON. See fastuse_proto::Selector.
+        selector: String,
+        /// Optional explicit root HWND for the UIA query (default foreground).
+        #[arg(long)]
+        root_hwnd: Option<String>,
+        /// Optional HWND to focus before clicking — useful when the target
+        /// is behind another window. Pass the same HWND that
+        /// `list-windows --title "X"` reports.
+        #[arg(long)]
+        focus_first: Option<String>,
+        /// Mouse button: left, right, middle.
+        #[arg(long, default_value = "left")]
+        button: String,
+        /// Number of clicks (1=single, 2=double, 3=triple).
+        #[arg(long, default_value_t = 1)]
+        count: u8,
+    },
 
     // ----- Phase 4: clipboard / shell / launch / processes -----
     /// Read text from the clipboard.
@@ -758,6 +780,25 @@ fn main() {
             Cmd::ScrollIntoView { selector, opts } => {
                 let opts = build_action_opts(opts)?;
                 cmd_phase3::scroll_into_view(&identity.path, &selector, opts).await
+            }
+            Cmd::ClickElement {
+                selector,
+                root_hwnd,
+                focus_first,
+                button,
+                count,
+            } => {
+                let root = root_hwnd.map(|s| parse_hwnd(&s)).transpose()?;
+                let focus = focus_first.map(|s| parse_hwnd(&s)).transpose()?;
+                cmd_phase3::click_element(
+                    &identity.path,
+                    &selector,
+                    root,
+                    focus,
+                    &button,
+                    count,
+                )
+                .await
             }
 
             // ---- Phase 4 ----

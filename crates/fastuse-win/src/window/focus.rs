@@ -3,9 +3,12 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
-    SetForegroundWindow, ASFW_ANY,
+    AllowSetForegroundWindow, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+    SetForegroundWindow, ShowWindow, ASFW_ANY, SW_RESTORE,
 };
 
 use fastuse_proto::{Error as ProtoError, ErrorCode};
@@ -34,6 +37,22 @@ pub fn focus_window(hwnd_raw: u64) -> Result<(), ProtoError> {
     // fatal.
     // SAFETY: ASFW_ANY is the documented sentinel.
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+
+    // Foreground-privilege grant: synthesize an Alt down/up via SendInput
+    // so Windows registers user-input recency on our thread and lifts
+    // SetForegroundWindow's lockout for the next call. Without this,
+    // SetForegroundWindow can return TRUE while the system silently just
+    // flashes the taskbar instead of raising the window — exactly the
+    // failure mode that blocks driving an app hidden behind another.
+    tap_alt_for_foreground_privilege();
+
+    // If the window is minimised, restore it before SetForegroundWindow —
+    // SetForegroundWindow on an iconic window does not un-minimise.
+    // SAFETY: IsIconic accepts any HWND.
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        // SAFETY: ShowWindow accepts any HWND + SHOW_WINDOW_CMD.
+        let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    }
 
     // Attach our input queue to the target thread (and the current
     // foreground thread) so SetForegroundWindow won't be denied.
@@ -74,8 +93,66 @@ pub fn focus_window(hwnd_raw: u64) -> Result<(), ProtoError> {
         ));
     }
 
+    // Verify foreground actually changed. SetForegroundWindow returns TRUE
+    // even when Windows just flashes the taskbar instead of raising — the
+    // Alt-tap above usually prevents this, but verify so the caller sees a
+    // real error instead of a silent lie.
+    // SAFETY: GetForegroundWindow is always safe.
+    let now_fg = unsafe { GetForegroundWindow() };
+    if now_fg.0 != hwnd.0 {
+        return Err(ProtoError::new(
+            ErrorCode::Internal,
+            format!(
+                "focus_window: SetForegroundWindow on HWND {hwnd_raw:#x} returned TRUE but foreground is still {:#x}",
+                now_fg.0 as u64
+            ),
+        )
+        .with_hint(
+            "Windows foreground-lockout: the target may be on another desktop, behind an always-on-top window, or the calling thread lacks foreground privilege. Try clicking on the target window manually first."
+                .to_string(),
+        ));
+    }
+
     invalidate_cache();
     Ok(())
+}
+
+/// Inject one paired Alt down/up via `SendInput` so the calling thread
+/// gains foreground-grant privilege. Win32 quirk: Windows treats synthetic
+/// input from a thread as user-activity, lifting `SetForegroundWindow`'s
+/// lockout for the immediately following call. A bare Alt down/up has no
+/// observable effect in any well-behaved app (menu bars only highlight on
+/// release-without-key, which doesn't happen here).
+fn tap_alt_for_foreground_privilege() {
+    let down = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(VK_MENU.0),
+                wScan: 0,
+                dwFlags: Default::default(),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(VK_MENU.0),
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [down, up];
+    // SAFETY: INPUT structs are fully initialised. SendInput accepts any
+    // slice length; failure (returns 0) is silent — we only need the
+    // foreground-privilege side-effect, so dropping events is acceptable.
+    let _ = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 }
 
 #[cfg(test)]

@@ -194,6 +194,121 @@ pub async fn scroll_into_view(pipe_path: &str, selector_json: &str, opts: Option
     print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
+/// Resolve a UIA selector to an element, focus its containing window if
+/// possible, then click the element's bounding-rect centre with native
+/// virtual-desktop pixels. v2 thin convenience over `uia-query` +
+/// `focus-window` + `computer left-click`.
+///
+/// Strategy:
+/// 1. UIA query → match list
+/// 2. Pick first match (caller can pre-filter by selector)
+/// 3. If `--focus-window <hwnd>` was passed, focus it first
+/// 4. Click bounding_rect centroid via `Request::Click` (count=1, button=Left)
+///
+/// Note: this does NOT do v1's "ladder" of fallback strategies. UIA
+/// degraded → no match → error. For adversarial apps, use vision
+/// (screenshot + computer left-click) instead.
+pub async fn click_element(
+    pipe_path: &str,
+    selector_json: &str,
+    root_hwnd: Option<u64>,
+    focus_first: Option<u64>,
+    button: &str,
+    count: u8,
+) -> anyhow::Result<()> {
+    use fastuse_proto::MouseButton;
+    let selector = parse_selector(selector_json)?;
+
+    // Step 1: UIA query
+    let q_req = Request::UiaQuery { selector, root_hwnd };
+    let matches = match one_call(pipe_path, q_req).await? {
+        Response::UiaQuery { matches, degraded } => {
+            if degraded && matches.is_empty() {
+                anyhow::bail!(
+                    "UIA returned degraded with no matches for selector — try vision (screenshot + computer left-click) on this app"
+                );
+            }
+            matches
+        }
+        Response::Error(e) => {
+            return print_err(e);
+        }
+        other => {
+            anyhow::bail!("unexpected uia-query response: {other:?}");
+        }
+    };
+    let first = matches.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!("no element matched selector — element may not exist or UIA tree may be incomplete")
+    })?;
+    let r = first.bounding_rect;
+    if r.w <= 0 || r.h <= 0 {
+        anyhow::bail!(
+            "matched element has zero bounding rect (likely off-screen or collapsed) — name={:?} automation_id={:?}",
+            first.name,
+            first.automation_id
+        );
+    }
+    let cx = r.x + r.w / 2;
+    let cy = r.y + r.h / 2;
+
+    // Step 2: focus window first if requested (lifts the target from behind
+    // any covering window so the click actually lands on it)
+    if let Some(hwnd) = focus_first {
+        let f_req = Request::FocusWindow { hwnd, opts: None };
+        match one_call(pipe_path, f_req).await? {
+            Response::Ack { .. } | Response::Window { .. } => {}
+            Response::Error(e) => {
+                eprintln!(
+                    "warning: focus-window failed: [{}] {} — proceeding to click anyway",
+                    e.code.as_str(),
+                    e.message
+                );
+            }
+            _ => {}
+        }
+        // Brief settle so the focused window paints before we click.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+
+    // Step 3: click the centroid
+    let mb = match button.to_lowercase().as_str() {
+        "left" | "l" => MouseButton::Left,
+        "right" | "r" => MouseButton::Right,
+        "middle" | "m" => MouseButton::Middle,
+        other => anyhow::bail!("unknown button {other:?}; use left|right|middle"),
+    };
+    let c_req = Request::Click {
+        x: cx,
+        y: cy,
+        button: mb,
+        count,
+        modifiers: vec![],
+        skip_set_cursor_pos: false,
+        opts: None,
+    };
+    match one_call(pipe_path, c_req).await? {
+        Response::Ack { slept_us } => {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "clicked_at": [cx, cy],
+                    "element": {
+                        "name": first.name,
+                        "automation_id": first.automation_id,
+                        "control_type": format!("{:?}", first.control_type),
+                        "bounds": [r.x, r.y, r.w, r.h],
+                    },
+                    "slept_us": slept_us,
+                })
+            );
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 fn print_match(res: Response) -> anyhow::Result<()> {
     match res {
         Response::Element { matched } => {
