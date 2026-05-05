@@ -1,0 +1,35 @@
+# Changelog
+
+## 2.0.0 — 2026-05-05
+
+Vision-first computer-use rebuild. Targeting layer (UIA+OCR) deleted; primary
+surface is the `computer` MCP tool matching Anthropic `computer_20251124`.
+UIA demoted to read-only inspection. Tier 1 humanization (Bezier curves +
+timing jitter) on by default for input.
+
+### Added
+- `computer` MCP tool (Anthropic schema fidelity)
+- `fastuse-mcp` server with image-content inline screenshots
+- `wait_for_window` Windows helper
+- `zoom` action for fine-detail inspection
+- Coordinate scaling state machine (per-session ScaleStack)
+- `InputBackend` trait abstraction (default: `SendInputBackend` with humanization)
+- `permissions` module with safe-mode gating
+- `config.toml` loader (`[permissions]`, `[input]`, `[scaling]` sections)
+- `setup-mcp` CLI subcommand (registers fastuse with Claude Code)
+- `fastuse-eval` crate with Tier 1, 2, 3 evaluation scenarios
+
+### Removed
+- `targeting/` module (execute, profile, candidate, strategy, hit_test, verify)
+- `ocr/` module (cropped, cache) and `ocr_thread`
+- CLI subcommands: `click-element`, `type-into-element`, `wait-for-element`
+- Wire types: `Strategy`, `VerificationEvidence`, `ExpectClause`,
+  `EscalatePolicy`, `Response::ActionResult`
+
+### Changed
+- CLAUDE.md rewritten around MCP-primary surface
+- README rewritten with v2 quick-start and migration link
+
+### Migration
+v1 binaries preserved at tag `v1.0-pre-pivot`. See
+[docs/migration-from-v1.md](docs/migration-from-v1.md).
