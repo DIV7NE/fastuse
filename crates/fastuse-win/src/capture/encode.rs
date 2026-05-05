@@ -65,6 +65,15 @@ pub fn encode(buf: &FrameBuf, format: ImageFormat) -> Result<EncodedImage, Proto
     Ok(EncodedImage { bytes, mime })
 }
 
+/// Encode pre-converted RGBA bytes directly to JPEG (quality 85).
+///
+/// Used by the v2 screenshot/zoom path, which resizes BGRA→RGBA before
+/// calling the encoder. Callers must ensure `rgba.len() == w * h * 4`.
+pub fn encode_jpeg_rgba(rgba: &[u8], w: u32, h: u32) -> Result<EncodedImage, ProtoError> {
+    let bytes = encode_jpeg(rgba, w, h)?;
+    Ok(EncodedImage { bytes, mime: "image/jpeg" })
+}
+
 fn encode_jpeg(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ProtoError> {
     // image 0.25's JpegEncoder requires Rgb8 input; drop alpha into a
     // thread-local scratch (not per-call) to avoid the per-frame alloc.
