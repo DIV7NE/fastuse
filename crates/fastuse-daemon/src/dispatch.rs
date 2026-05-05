@@ -23,19 +23,21 @@
 //! accidentally exposes one. (Codex review fix; closes self-grant hole.)
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use base64::Engine as _;
 use fastuse_core::perm::{self, Tier};
 use fastuse_core::FastuseError;
 use fastuse_proto::{
-    coords::WindowInfo as ProtoWindowInfo, ClipboardSet, Error, ErrorCode, MonitorInfo, MouseButton,
-    ProcessSelector, Request, Response, ScrollDirection,
+    coords::WindowInfo as ProtoWindowInfo, ClipboardSet, Error, ErrorCode, MonitorInfo,
+    MouseButton, ProcessSelector, Request, Response, ScrollDirection,
 };
-use fastuse_win::capture::{handle_screenshot, handle_screenshot_region};
+use fastuse_win::capture::{handle_screenshot, handle_screenshot_region, handle_screenshot_v2, handle_zoom_v2};
 use fastuse_win::capture_thread::CaptureThreadHandle;
 use fastuse_win::input::handlers as ih;
 use fastuse_win::input_thread::{InputJob, InputThreadHandle};
+use fastuse_win::scaling::ScaleStack;
 use fastuse_win::uia::{
     handle_inspect_at_point, handle_scroll_into_view, handle_uia_query, handle_uia_tree,
 };
@@ -63,6 +65,9 @@ pub struct DispatchCtx {
     pub idle_timeout_secs: u64,
     /// Per-connection session state (immutable allow-list, etc.).
     pub session: Session,
+    /// Per-session scale-context stack for vision-first coordinate translation
+    /// (Task 10). Reset on every `Screenshot`; pushed on every `Zoom`.
+    pub scale: Arc<Mutex<ScaleStack>>,
 }
 
 /// Outcome of dispatching a single frame.
@@ -401,14 +406,16 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             finalize(inner, opts, ctx)
         }
 
-        // --- v2 computer action dispatch (wired in Task 10) ---
-        Request::Computer(_) => Response::Error(Error::new(
-            ErrorCode::Internal,
-            "dispatch wired in Task 10".to_string(),
-        )),
+        // --- v2 computer action dispatch (Task 10) ---
+        Request::Computer(req) => {
+            let w_start = Instant::now();
+            let r = dispatch_computer(req, ctx).await;
+            win32_us = w_start.elapsed().as_micros() as i64;
+            r
+        }
         Request::WaitForWindowV2(_) => Response::Error(Error::new(
             ErrorCode::Internal,
-            "dispatch wired in Task 10".to_string(),
+            "dispatch wired in Task 11".to_string(),
         )),
     };
 
@@ -537,6 +544,463 @@ pub fn err_response(code: ErrorCode, msg: impl Into<String>) -> Response {
 #[allow(dead_code)]
 fn _types_used(_: MouseButton, _: ScrollDirection) {}
 
+// ---------------------------------------------------------------------------
+// v2 computer action dispatch (Task 10)
+// ---------------------------------------------------------------------------
+
+/// Dispatch a single `ComputerRequest` to the appropriate input/capture path.
+async fn dispatch_computer(
+    req: fastuse_proto::wire::ComputerRequest,
+    ctx: &DispatchCtx,
+) -> Response {
+    use fastuse_proto::wire::{ComputerAction, ComputerResult, ImagePayload, ScrollDir};
+    use fastuse_win::input::backend::{
+        InputAction, MotionProfile, MouseButton as BackendButton,
+        ScrollDirection as BackendScrollDir, TypingProfile,
+    };
+    use fastuse_win::input::sendinput::Modifiers;
+
+    let ok_response = || Response::Computer(ComputerResult {
+        ok: true,
+        image: None,
+        cursor: None,
+        scale: None,
+    });
+
+    match req.action {
+        // ------------------------------------------------------------------
+        ComputerAction::Screenshot { monitor } => {
+            let Some(capture) = ctx.capture.as_ref() else {
+                return Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "capture thread unavailable".to_string(),
+                ));
+            };
+            let target_max = fastuse_win::scaling::DEFAULT_TARGET_MAX;
+            match handle_screenshot_v2(capture, monitor, target_max) {
+                Err(e) => Response::Error(e),
+                Ok(raw) => {
+                    let snap = raw.to_snapshot();
+                    ctx.scale.lock().unwrap().reset(snap.clone());
+                    let scale_info = scale_info_from(&snap);
+                    Response::Computer(ComputerResult {
+                        ok: true,
+                        image: Some(ImagePayload {
+                            format: "jpeg".into(),
+                            width: raw.scaled_w,
+                            height: raw.scaled_h,
+                            data_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&raw.bytes),
+                        }),
+                        cursor: None,
+                        scale: Some(scale_info),
+                    })
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::LeftClick { coordinate, text, humanize } => {
+            let modifiers = parse_chord_modifiers(text.as_ref().map(|r| r.as_inner().as_str()));
+            match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => r,
+                Ok(at) => dispatch_input(
+                    ctx,
+                    InputAction::MouseClick {
+                        at,
+                        button: BackendButton::Left,
+                        count: 1,
+                        modifiers,
+                        humanize,
+                    },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::RightClick { coordinate, humanize } => {
+            match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => r,
+                Ok(at) => dispatch_input(
+                    ctx,
+                    InputAction::MouseClick {
+                        at,
+                        button: BackendButton::Right,
+                        count: 1,
+                        modifiers: Modifiers::default(),
+                        humanize,
+                    },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::MiddleClick { coordinate, humanize } => {
+            match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => r,
+                Ok(at) => dispatch_input(
+                    ctx,
+                    InputAction::MouseClick {
+                        at,
+                        button: BackendButton::Middle,
+                        count: 1,
+                        modifiers: Modifiers::default(),
+                        humanize,
+                    },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::DoubleClick { coordinate, humanize } => {
+            match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => r,
+                Ok(at) => dispatch_input(
+                    ctx,
+                    InputAction::MouseClick {
+                        at,
+                        button: BackendButton::Left,
+                        count: 2,
+                        modifiers: Modifiers::default(),
+                        humanize,
+                    },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::TripleClick { coordinate, humanize } => {
+            match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => r,
+                Ok(at) => dispatch_input(
+                    ctx,
+                    InputAction::MouseClick {
+                        at,
+                        button: BackendButton::Left,
+                        count: 3,
+                        modifiers: Modifiers::default(),
+                        humanize,
+                    },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::LeftClickDrag { start_coordinate, coordinate, humanize, text } => {
+            let modifiers = parse_chord_modifiers(text.as_ref().map(|r| r.as_inner().as_str()));
+            let from = match translate_or_err(&ctx.scale, start_coordinate) {
+                Err(r) => return r,
+                Ok(p) => p,
+            };
+            let to = match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => return r,
+                Ok(p) => p,
+            };
+            dispatch_input(
+                ctx,
+                InputAction::Drag {
+                    from,
+                    to,
+                    button: BackendButton::Left,
+                    profile: MotionProfile { humanize, ..MotionProfile::default() },
+                    modifiers,
+                },
+            )
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::LeftMouseDown { coordinate } => {
+            let at = match coordinate {
+                Some(c) => match translate_or_err(&ctx.scale, c) {
+                    Err(r) => return r,
+                    Ok(p) => p,
+                },
+                None => {
+                    match cursor_position_backend() {
+                        Err(r) => return r,
+                        Ok(p) => p,
+                    }
+                }
+            };
+            dispatch_input(ctx, InputAction::MouseDown { at, button: BackendButton::Left })
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::LeftMouseUp { coordinate } => {
+            let at = match coordinate {
+                Some(c) => match translate_or_err(&ctx.scale, c) {
+                    Err(r) => return r,
+                    Ok(p) => p,
+                },
+                None => {
+                    match cursor_position_backend() {
+                        Err(r) => return r,
+                        Ok(p) => p,
+                    }
+                }
+            };
+            dispatch_input(ctx, InputAction::MouseUp { at, button: BackendButton::Left })
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::MouseMove { coordinate, humanize } => {
+            let to = match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => return r,
+                Ok(p) => p,
+            };
+            let from = match cursor_position_backend() {
+                Err(r) => return r,
+                Ok(p) => p,
+            };
+            dispatch_input(
+                ctx,
+                InputAction::MouseMove {
+                    from,
+                    to,
+                    profile: MotionProfile { humanize, ..MotionProfile::default() },
+                },
+            )
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::CursorPosition => {
+            match cursor_position() {
+                Err(e) => Response::Error(e),
+                Ok((x, y, _)) => Response::Computer(ComputerResult {
+                    ok: true,
+                    image: None,
+                    cursor: Some([x, y]),
+                    scale: None,
+                }),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::Type { text, humanize } => {
+            // Unwrap the Redact only here; never pass it to a format macro.
+            let payload = text.into_inner();
+            dispatch_input(
+                ctx,
+                InputAction::KeyType {
+                    text: payload,
+                    profile: TypingProfile { humanize, ..TypingProfile::default() },
+                },
+            )
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::Key { text } => {
+            match parse_key_chord(&text.into_inner()) {
+                Err(e) => e,
+                Ok(keys) => dispatch_input(
+                    ctx,
+                    InputAction::KeyChord { keys, hold_ms: None },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::HoldKey { text, duration } => {
+            match parse_key_chord(&text.into_inner()) {
+                Err(e) => e,
+                Ok(keys) => dispatch_input(
+                    ctx,
+                    InputAction::KeyChord { keys, hold_ms: Some(duration) },
+                ),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::Scroll { coordinate, scroll_direction, scroll_amount } => {
+            let at = match translate_or_err(&ctx.scale, coordinate) {
+                Err(r) => return r,
+                Ok(p) => p,
+            };
+            let direction = match scroll_direction {
+                ScrollDir::Up => BackendScrollDir::Up,
+                ScrollDir::Down => BackendScrollDir::Down,
+                ScrollDir::Left => BackendScrollDir::Left,
+                ScrollDir::Right => BackendScrollDir::Right,
+            };
+            dispatch_input(ctx, InputAction::Scroll { at, direction, amount: scroll_amount })
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::Wait { duration } => {
+            tokio::time::sleep(std::time::Duration::from_millis(duration as u64)).await;
+            ok_response()
+        }
+
+        // ------------------------------------------------------------------
+        ComputerAction::Zoom { coordinate, zoom_factor } => {
+            let snap_now = {
+                let locked = ctx.scale.lock().unwrap();
+                match locked.current().cloned() {
+                    None => {
+                        return Response::Error(Error::new(
+                            ErrorCode::Internal,
+                            "no scale context — call screenshot first".to_string(),
+                        ))
+                    }
+                    Some(s) => s,
+                }
+            };
+            let Some(capture) = ctx.capture.as_ref() else {
+                return Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "capture thread unavailable".to_string(),
+                ));
+            };
+            let target_max = fastuse_win::scaling::DEFAULT_TARGET_MAX;
+            match handle_zoom_v2(capture, snap_now, coordinate, zoom_factor, target_max) {
+                Err(e) => Response::Error(e),
+                Ok(raw) => {
+                    let snap_zoom = raw.to_snapshot();
+                    ctx.scale.lock().unwrap().push(snap_zoom.clone());
+                    let scale_info = scale_info_from(&snap_zoom);
+                    Response::Computer(ComputerResult {
+                        ok: true,
+                        image: Some(ImagePayload {
+                            format: "jpeg".into(),
+                            width: raw.scaled_w,
+                            height: raw.scaled_h,
+                            data_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&raw.bytes),
+                        }),
+                        cursor: None,
+                        scale: Some(scale_info),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Translate a scaled image-space coordinate to native virtual-desktop pixels.
+/// Returns `Response::Error` (not `Err`) so callers can return it directly.
+fn translate_or_err(
+    scale: &Arc<Mutex<ScaleStack>>,
+    coordinate: [i32; 2],
+) -> Result<fastuse_win::input::backend::Point, Response> {
+    use fastuse_proto::coords::Point as ProtoPoint;
+    use fastuse_win::input::backend::Point as BackendPoint;
+    use fastuse_win::scaling::ScaleError;
+
+    let p = ProtoPoint { x: coordinate[0], y: coordinate[1] };
+    let locked = scale.lock().unwrap();
+    match locked.translate(p) {
+        Ok(native) => Ok(BackendPoint { x: native.x, y: native.y }),
+        Err(ScaleError::NoContext) => Err(Response::Error(
+            Error::new(ErrorCode::Internal, "no scale context — call screenshot first".to_string())
+                .with_hint("send a Screenshot action before any click/scroll/drag"),
+        )),
+        Err(ScaleError::OutOfBounds { point, bounds }) => Err(Response::Error(
+            Error::new(
+                ErrorCode::Internal,
+                format!(
+                    "coordinate [{}, {}] out of scaled image bounds {}×{}",
+                    point.x, point.y, bounds.0, bounds.1
+                ),
+            )
+            .with_hint("coordinates must be within the scaled image dimensions from the last screenshot"),
+        )),
+    }
+}
+
+/// Dispatch an [`InputAction`] to the input thread and return `Response::Computer`.
+fn dispatch_input(ctx: &DispatchCtx, action: fastuse_win::input::backend::InputAction) -> Response {
+    let Some(input) = ctx.input.as_ref() else {
+        return Response::Error(Error::new(
+            ErrorCode::Internal,
+            "input thread unavailable".to_string(),
+        ));
+    };
+    match input.dispatch(action) {
+        Ok(()) => Response::Computer(fastuse_proto::wire::ComputerResult {
+            ok: true,
+            image: None,
+            cursor: None,
+            scale: None,
+        }),
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Read the current cursor position and convert to a backend `Point`.
+fn cursor_position_backend() -> Result<fastuse_win::input::backend::Point, Response> {
+    use fastuse_win::input::backend::Point as BackendPoint;
+    cursor_position()
+        .map(|(x, y, _)| BackendPoint { x, y })
+        .map_err(Response::Error)
+}
+
+/// Parse a modifier chord string like `"ctrl+shift"` into [`Modifiers`].
+/// Unknown tokens are silently ignored (best-effort, matches v1 behavior).
+fn parse_chord_modifiers(text: Option<&str>) -> fastuse_win::input::sendinput::Modifiers {
+    use fastuse_proto::chord::ModKey;
+    use fastuse_win::input::sendinput::Modifiers;
+    let Some(s) = text else { return Modifiers::default() };
+    let mut m = Modifiers::default();
+    // Split on '+' and check each token for modifier keywords.
+    for token in s.split('+') {
+        let lc: String = token.chars().flat_map(|c| c.to_lowercase()).collect();
+        match lc.trim() {
+            "ctrl" | "control" => m.ctrl = true,
+            "shift" => m.shift = true,
+            "alt" => m.alt = true,
+            "win" | "super" | "meta" => m.win = true,
+            _ => {}
+        }
+    }
+    m
+}
+
+/// Parse a key chord string like `"ctrl+l"` or `"enter"` into VK codes.
+/// Returns `Err(Response::Error(...))` if the chord is malformed.
+fn parse_key_chord(
+    text: &str,
+) -> Result<Vec<u16>, Response> {
+    use fastuse_proto::chord::{parse_chord, ChordKey, ModKey};
+    parse_chord(text)
+        .map(|chord| {
+            let mut keys: Vec<u16> = Vec::new();
+            for m in &chord.mods {
+                keys.push(m.vk());
+            }
+            match chord.key {
+                ChordKey::Vk(vk) => keys.push(vk),
+                ChordKey::Unicode(c) => {
+                    // Unicode scalar: emit as a VK code if ASCII letter/digit,
+                    // otherwise fall back to the char's u16 value for SendInput.
+                    let vk = (c as u32).min(0xFFFF) as u16;
+                    keys.push(vk);
+                }
+            }
+            keys
+        })
+        .map_err(|e| {
+            Response::Error(
+                Error::new(
+                    ErrorCode::Internal,
+                    format!("invalid key chord {:?}: {e}", text),
+                )
+                .with_hint("use xdotool-style syntax: ctrl+l, enter, alt+f4, win+d"),
+            )
+        })
+}
+
+/// Build a [`ScaleInfo`] wire type from a [`ScaleSnapshot`].
+fn scale_info_from(snap: &fastuse_win::scaling::ScaleSnapshot) -> fastuse_proto::wire::ScaleInfo {
+    fastuse_proto::wire::ScaleInfo {
+        ratio: snap.ratio,
+        monitor_origin: [snap.monitor_origin.x, snap.monitor_origin.y],
+        native_w: snap.native_w,
+        native_h: snap.native_h,
+        scaled_w: snap.scaled_w,
+        scaled_h: snap.scaled_h,
+    }
+}
+
 /// Apply `ActionOpts` post-action perception. Returns the inner response
 /// unchanged when `opts` is `None`; otherwise delegates to `action_opts::apply`.
 fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &DispatchCtx) -> Response {
@@ -565,6 +1029,7 @@ mod tests {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             idle_timeout_secs: 300,
             session: Session::new(allow),
+            scale: Arc::new(Mutex::new(ScaleStack::new())),
         }
     }
 

@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 once_cell = { workspace = true }
 scopeguard = { workspace = true }
 clap = { workspace = true }
+base64 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

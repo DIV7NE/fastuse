@@ -2,13 +2,13 @@
 //! Hello/Welcome handshake.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use fastuse_proto::{decode_payload, encode_frame, Request, Response};
 use fastuse_win::{
     capture_thread::CaptureThreadHandle, input_thread::InputThreadHandle,
-    uia_pool::UiaPoolHandle,
+    scaling::ScaleStack, uia_pool::UiaPoolHandle,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -92,6 +92,7 @@ pub async fn serve(
             shutdown_flag: Arc::clone(&shutdown),
             idle_timeout_secs,
             session: Session::new(allow.clone()),
+            scale: Arc::new(Mutex::new(ScaleStack::new())),
         };
 
         tokio::spawn(async move {
