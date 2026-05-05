@@ -69,6 +69,11 @@ pub struct DispatchCtx {
     /// Per-session scale-context stack for vision-first coordinate translation
     /// (Task 10). Reset on every `Screenshot`; pushed on every `Zoom`.
     pub scale: Arc<Mutex<ScaleStack>>,
+    /// Safe-mode permission policy resolved at daemon startup from
+    /// `config.toml` and `FASTUSE_SAFE_MODE`. When `safe_mode` is active
+    /// and the tool is in the gated set, dispatch returns
+    /// `PermissionRequired` before the normal allow-list check runs.
+    pub permissions: Arc<fastuse_win::permissions::Permissions>,
 }
 
 /// Outcome of dispatching a single frame.
@@ -261,17 +266,22 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             finalize(inner, opts, ctx)
         }
         Request::ShellExec(se) => {
-            let tier = perm::resolve("shell_exec", None, ctx.session.allow());
-            match tier {
-                Tier::Blocked => err_blocked("shell_exec", "deny-list"),
-                Tier::Confirmed => err_required("shell_exec"),
-                Tier::Free => {
-                    let w = Instant::now();
-                    let r = fastuse_win::shell::shell_exec(se).await;
-                    win32_us = w.elapsed().as_micros() as i64;
-                    match r {
-                        Ok(res) => Response::ShellExec(res),
-                        Err(e) => Response::Error(e.to_wire()),
+            // Safe-mode check before allow-list resolution.
+            if let Err(resp) = safe_mode_gate(ctx, "shell_exec") {
+                resp
+            } else {
+                let tier = perm::resolve("shell_exec", None, ctx.session.allow());
+                match tier {
+                    Tier::Blocked => err_blocked("shell_exec", "deny-list"),
+                    Tier::Confirmed => err_required("shell_exec"),
+                    Tier::Free => {
+                        let w = Instant::now();
+                        let r = fastuse_win::shell::shell_exec(se).await;
+                        win32_us = w.elapsed().as_micros() as i64;
+                        match r {
+                            Ok(res) => Response::ShellExec(res),
+                            Err(e) => Response::Error(e.to_wire()),
+                        }
                     }
                 }
             }
@@ -500,6 +510,11 @@ impl GateOutcome {
 }
 
 /// Run permission resolution then invoke the handler closure if Free.
+///
+/// Safe-mode is checked first: if `ctx.permissions.is_allowed(tool)` returns
+/// `false`, `PermissionRequired` is returned immediately before the normal
+/// allow-list check runs.  This means even a session with `--allow=*` cannot
+/// invoke a gated tool while `FASTUSE_SAFE_MODE=1`.
 async fn gate_then<F>(
     tool: &'static str,
     target: Option<&str>,
@@ -509,6 +524,14 @@ async fn gate_then<F>(
 where
     F: FnOnce(&DispatchCtx) -> (Result<Response, FastuseError>, i64),
 {
+    // Safe-mode check — overrides the allow-list.
+    if let Err(resp) = safe_mode_gate(ctx, tool) {
+        return GateOutcome {
+            result: Ok(resp),
+            win32_us: 0,
+        };
+    }
+
     match perm::resolve(tool, target, ctx.session.allow()) {
         Tier::Blocked => GateOutcome {
             result: Err(FastuseError::PermissionBlocked {
@@ -549,6 +572,28 @@ fn err_blocked(tool: &'static str, reason: &'static str) -> Response {
         )
         .with_hint(reason),
     )
+}
+
+/// Check the safe-mode `Permissions` policy before invoking a gated tool.
+///
+/// Returns `Err(Response::Error(PermissionRequired))` with a hint when
+/// `safe_mode` is active and `tool` is in the gated set.  Returns `Ok(())`
+/// when the policy allows invocation, letting the caller proceed to the
+/// normal `perm::resolve` allow-list check.
+fn safe_mode_gate(ctx: &DispatchCtx, tool: &str) -> Result<(), Response> {
+    if ctx.permissions.is_allowed(tool) {
+        Ok(())
+    } else {
+        Err(Response::Error(
+            Error::new(
+                ErrorCode::PermissionRequired,
+                format!("tool '{tool}' is gated in safe mode"),
+            )
+            .with_hint(
+                "set FASTUSE_SAFE_MODE=0 to disable, or remove from gated_tools in config.toml",
+            ),
+        ))
+    }
 }
 
 /// Build a typed `Response::Error` for known error conditions.
@@ -1067,6 +1112,8 @@ mod tests {
             idle_timeout_secs: 300,
             session: Session::new(allow),
             scale: Arc::new(Mutex::new(ScaleStack::new())),
+            // Tests default to safe_mode off so existing allow-list tests pass.
+            permissions: Arc::new(fastuse_win::permissions::Permissions::default()),
         }
     }
 
@@ -1203,6 +1250,87 @@ mod tests {
         match r.response {
             Response::ListProcesses(_) => (),
             other => panic!("expected ListProcesses, got {other:?}"),
+        }
+    }
+
+    /// Helper: build a `DispatchCtx` with safe_mode active (default gated set).
+    fn ctx_safe_mode(allow: Vec<String>) -> DispatchCtx {
+        use fastuse_win::permissions::{Permissions, DEFAULT_GATED};
+        DispatchCtx {
+            session_id: 1,
+            input: None,
+            uia: None,
+            capture: None,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            idle_timeout_secs: 300,
+            session: Session::new(allow),
+            scale: Arc::new(Mutex::new(ScaleStack::new())),
+            permissions: Arc::new(Permissions {
+                safe_mode: true,
+                gated: DEFAULT_GATED.iter().map(|s| s.to_string()).collect(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_mode_blocks_kill_process_even_with_allow() {
+        // kill_process is in allow list but safe_mode should gate it first.
+        let ctx = ctx_safe_mode(vec!["kill_process".into()]);
+        let r = handle(
+            Request::KillProcess(fastuse_proto::KillProcess {
+                selector: ProcessSelector::Pid(99999),
+                force: None,
+                process_tree: None,
+            }),
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => {
+                assert_eq!(e.code, ErrorCode::PermissionRequired);
+                let hint = e.hint.expect("hint must be present");
+                assert!(hint.contains("FASTUSE_SAFE_MODE=0"));
+            }
+            other => panic!("expected PermissionRequired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_mode_blocks_shell_exec_even_with_allow() {
+        let ctx = ctx_safe_mode(vec!["shell_exec".into()]);
+        let r = handle(
+            Request::ShellExec(ShellExec {
+                command: Redact::new("echo hi".into()),
+                shell: None,
+                env: None,
+                cwd: None,
+                timeout_ms: Some(2_000),
+                stream_chunk_size: None,
+            }),
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => {
+                assert_eq!(e.code, ErrorCode::PermissionRequired);
+                let hint = e.hint.expect("hint must be present");
+                assert!(hint.contains("FASTUSE_SAFE_MODE=0"));
+            }
+            other => panic!("expected PermissionRequired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_mode_does_not_block_list_processes() {
+        let ctx = ctx_safe_mode(vec![]);
+        let r = handle(
+            Request::ListProcesses(fastuse_proto::ListProcesses { filter: None }),
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::ListProcesses(_) => (),
+            other => panic!("expected ListProcesses (not gated), got {other:?}"),
         }
     }
 }

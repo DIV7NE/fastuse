@@ -207,6 +207,24 @@ fn main() {
         tracing::info!(?allow, "permission allow-list active");
     }
 
+    // Load config and build the safe-mode Permissions policy.
+    let cfg_path = fastuse_core::config::default_path();
+    let config = match cfg_path.as_ref() {
+        Some(p) => fastuse_core::config::load_or_default(p),
+        None => fastuse_core::config::Config::default(),
+    };
+    let permissions = std::sync::Arc::new(
+        fastuse_win::permissions::Permissions::from_env_and_config(
+            config.permissions.safe_mode,
+            config.permissions.gated_tools.clone(),
+        ),
+    );
+    tracing::info!(
+        safe_mode = permissions.safe_mode,
+        gated_count = permissions.gated.len(),
+        "permissions resolved",
+    );
+
     let server_result = rt.block_on(async {
         server::serve(
             identity.path.clone(),
@@ -216,6 +234,7 @@ fn main() {
             args.idle_timeout,
             identity.session_id,
             allow,
+            permissions,
         )
         .await
     });
