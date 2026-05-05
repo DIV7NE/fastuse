@@ -1,21 +1,66 @@
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
-**fastuse**
+**fastuse v2 — vision-first Windows computer-use control plane**
 
-`fastuse` is a Windows computer-use control plane built for AI coding agents. It exposes screenshot, UI Automation, keyboard, mouse, clipboard, and shell primitives over MCP and a thin native CLI so any agent (Claude Code, opencode, Codex, Cursor, Cline, etc.) can drive the user's Windows desktop. The non-negotiable design constraint is raw speed — every primitive aims for sub-50ms tool round-trip, beating `windows-mcp` by an order of magnitude.
+Drives the Windows desktop like a human: see the screen, click, type, scroll.
+Vision-first; no accessibility-tree-based targeting. Works on cooperative apps
+(Calculator, browsers, IDEs) and adversarial apps (Electron, custom-rendered
+WPF, Direct2D) because the substrate is vision, not UIA introspection.
 
-**Core Value:** **Latency.** Every other property (coverage, ergonomics, error messages, polish) is negotiable. If a tool call is not measurably faster than `windows-mcp` at the same task, it has failed its purpose.
+**Primary path: MCP tools.**
 
-### Constraints
+After running `fastuse-cli setup-mcp --user` once and restarting Claude Code,
+the following tools are available:
 
-- **Tech stack**: Rust — chosen for ms-level startup, single-binary deploys, mature `windows-rs` bindings, mature `rmcp` MCP crate, and zero-runtime distribution
-- **Platform**: Windows 10 1809+ / Windows 11 — UIAutomation, DXGI desktop duplication, Win32 SendInput required
-- **Performance budget**: tool RTT <50ms (no capture), <150ms (screenshot), <20ms (UIA query) — these are the project's reason to exist
-- **Distribution**: single-file binary; daemon auto-spawns on first MCP connection
-- **Compatibility**: MCP spec compliance (stdio transport mandatory, SSE optional) so any agent can plug in without custom integration
-- **Dependencies**: prefer first-party Microsoft APIs (UIAutomation, SendInput, DXGI, Windows.Graphics.Capture) over third-party wrappers — fewer layers = less latency
-- **Trust model**: local-only RPC; no auth in v1 (trust boundary is the user's machine), but daemon must refuse non-loopback connections by default
+- `mcp__fastuse__computer({action: "screenshot"})` — returns ImageContent inline
+- `mcp__fastuse__computer({action: "left_click", coordinate: [x, y]})`
+- `mcp__fastuse__computer({action: "type", text: "hello"})`
+- `mcp__fastuse__computer({action: "key", text: "ctrl+s"})`
+- `mcp__fastuse__computer({action: "scroll", coordinate: [x, y], scroll_direction: "down", scroll_amount: 3})`
+- `mcp__fastuse__computer({action: "left_click_drag", start_coordinate: [...], coordinate: [...]})`
+- `mcp__fastuse__computer({action: "zoom", coordinate: [x, y], zoom_factor: 2.5})` — for fine-detail inspection
+
+Plus Windows-specific helpers as separate MCP tools:
+`mcp__fastuse__list_windows`, `mcp__fastuse__focus_window`,
+`mcp__fastuse__foreground_window`, `mcp__fastuse__wait_for_window`,
+`mcp__fastuse__list_processes`, `mcp__fastuse__kill_process`,
+`mcp__fastuse__launch_app`, `mcp__fastuse__shell_exec`,
+`mcp__fastuse__clipboard_get_text`, `mcp__fastuse__clipboard_set_text`,
+`mcp__fastuse__inspect_at`, `mcp__fastuse__uia_query`,
+`mcp__fastuse__uia_tree`.
+
+UIA tools are read-only — they return structure for grounding (DevTools-style),
+they do not click. All clicking goes through `computer` with coordinates.
+
+**Secondary path: Bash → CLI** for one-shot actions, debugging, scripting:
+- `fastuse-cli computer screenshot --out file.jpg`
+- `fastuse-cli computer left-click 100 200 --instant`
+- `fastuse-cli list-windows --title "Discord"`
+
+**Coordinate system.** MCP screenshots are scaled to ~1024-wide image space.
+Click coordinates Claude returns in MCP are in *that scaled space*; the daemon
+translates to native pixels. CLI uses native virtual-desktop pixels (no scaling).
+
+**Always take a screenshot before clicking** unless you're sure the layout
+hasn't changed since the last screenshot. Without a recent screenshot, click
+coords have no scale context and the daemon will reject them.
+
+**Permission model.** Default: all tools available. Set `FASTUSE_SAFE_MODE=1`
+or edit `%LOCALAPPDATA%\fastuse\config.toml` to gate `kill_process`,
+`shell_exec`, `launch_app`, `clipboard_set_*`. Computer actions, listings,
+and UIA inspection always allowed.
+
+**Daemon lifecycle.** Auto-spawns elevated via UAC on first call. Idle-timeout
+5 min. On `DAEMON_SPAWN_FAILED`: kill stale daemon, remove pid sentinel, retry.
+
+**Humanization (default-on).** Mouse moves use Bezier curves; keystrokes have
+timing jitter. Defeats web behavioral bot detection (Cloudflare-class). Pass
+`humanize: false` (MCP) or `--instant` (CLI) to opt out for speed-over-realism
+cases (driving your own apps for testing, automated scripts).
+
+**Out of scope.** Anti-cheat circumvention, kernel-mode drivers, hardware HID
+firmware (latter deferred to a follow-up project).
 <!-- GSD:project-end -->
 
 <!-- GSD:stack-start source:research/STACK.md -->
