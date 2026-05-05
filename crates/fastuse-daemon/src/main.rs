@@ -175,6 +175,13 @@ fn main() {
             None
         }
     };
+    let ocr = match fastuse_win::ocr_thread::spawn_ocr_thread() {
+        Ok(h) => Some(std::sync::Arc::new(h)),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to spawn ocr thread");
+            None
+        }
+    };
 
     // Best-effort warmup runs in a background thread once the pipe server is
     // up — running it on the spawn path can deadlock first-call DXGI duplication
@@ -214,6 +221,7 @@ fn main() {
             input.clone(),
             uia.clone(),
             capture.clone(),
+            ocr.clone(),
             args.idle_timeout,
             identity.session_id,
             allow,

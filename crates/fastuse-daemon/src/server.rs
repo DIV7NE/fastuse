@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use fastuse_proto::{decode_payload, encode_frame, Request, Response};
 use fastuse_win::{
-    capture_thread::CaptureThreadHandle, input_thread::InputThreadHandle, uia_pool::UiaPoolHandle,
+    capture_thread::CaptureThreadHandle, input_thread::InputThreadHandle,
+    ocr_thread::OcrThreadHandle, uia_pool::UiaPoolHandle,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -23,6 +24,7 @@ pub async fn serve(
     input: Option<Arc<InputThreadHandle>>,
     uia: Option<Arc<UiaPoolHandle>>,
     capture: Option<Arc<CaptureThreadHandle>>,
+    ocr: Option<Arc<OcrThreadHandle>>,
     idle_timeout_secs: u64,
     session_id: u32,
     allow: Vec<String>,
@@ -88,6 +90,7 @@ pub async fn serve(
             input: input_arc.clone(),
             uia: uia.clone(),
             capture: capture.clone(),
+            ocr: ocr.clone(),
             shutdown_flag: Arc::clone(&shutdown),
             idle_timeout_secs,
             session: Session::new(allow.clone()),
