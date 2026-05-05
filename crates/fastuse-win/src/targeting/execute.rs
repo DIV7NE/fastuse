@@ -129,8 +129,13 @@ pub async fn execute_targeted<'a>(req: TargetedRequest<'a>) -> Response {
     for (i, strategy) in ladder.iter().enumerate() {
         last_strategy = *strategy;
 
-        // Hit-test gate before any coordinate strategy.
-        if is_coord_strategy(*strategy) {
+        // Hit-test gate before any coordinate strategy. Skip for BoundsClickOcr
+        // when the candidate isn't already OCR — the strategy re-resolves via
+        // OCR and produces its own bounds that the original candidate's
+        // hit-test verdict cannot speak to.
+        let skip_gate = matches!(*strategy, Strategy::BoundsClickOcr)
+            && !matches!(&candidate, TargetCandidate::Ocr { .. });
+        if is_coord_strategy(*strategy) && !skip_gate {
             let verdict = hit_test_for_candidate(&candidate, *strategy, req.uia);
             if verdict == HitTestVerdict::Mismatch {
                 // Don't count this as a "verified attempt" — we never clicked.
@@ -138,7 +143,7 @@ pub async fn execute_targeted<'a>(req: TargetedRequest<'a>) -> Response {
             }
         }
 
-        let outcome = run_strategy(*strategy, &candidate, &req).await;
+        let outcome = run_strategy(*strategy, &candidate, &req, hwnd).await;
 
         if outcome.verified {
             return Response::ActionResult {
@@ -231,6 +236,7 @@ async fn run_strategy<'a>(
     strategy: Strategy,
     candidate: &TargetCandidate,
     req: &TargetedRequest<'a>,
+    hwnd: u64,
 ) -> StrategyOutcome {
     let cap_ms = req.opts.and_then(|o| o.wait_timeout_ms);
     let started = Instant::now();
@@ -242,7 +248,7 @@ async fn run_strategy<'a>(
         Strategy::UiaExpandCollapse => run_uia_expand_collapse(candidate, req, cap_ms).await,
         Strategy::UiaSetValue => run_uia_set_value(candidate, req, cap_ms).await,
         Strategy::BoundsClickUia => run_bounds_click_uia(candidate, req, cap_ms).await,
-        Strategy::BoundsClickOcr => run_bounds_click_ocr(candidate, req).await,
+        Strategy::BoundsClickOcr => run_bounds_click_ocr(candidate, req, hwnd).await,
         Strategy::BoundsClickGeometry => run_bounds_click_geometry(candidate, req).await,
     };
 
@@ -651,17 +657,80 @@ async fn run_bounds_click_uia<'a>(
 async fn run_bounds_click_ocr<'a>(
     candidate: &TargetCandidate,
     req: &TargetedRequest<'a>,
+    hwnd: u64,
 ) -> (bool, VerificationEvidence, Option<u32>) {
-    let bounds = match candidate {
-        TargetCandidate::Ocr { bounds, .. } => *bounds,
-        _ => return (false, VerificationEvidence::Unverified, None),
+    // Direct path: candidate already came from OCR (profile-time fallback).
+    if let TargetCandidate::Ocr { bounds, .. } = candidate {
+        let click_ok = perform_click_at_bounds(*bounds, req).await;
+        if !click_ok {
+            return (false, VerificationEvidence::Unverified, None);
+        }
+        return (false, VerificationEvidence::HitTestOnly, None);
+    }
+
+    // Escalation path: prior tier (Pattern / BoundsClickUia / BoundsClickGeometry)
+    // failed to verify. Re-resolve the selector text via OCR over the window's
+    // client rect and click the best matching line.
+    let (cap, ocr_h) = match (req.capture, req.ocr) {
+        (Some(c), Some(o)) => (c, o),
+        _ => {
+            tracing::info!(
+                target: "fastuse_win::targeting::execute",
+                "BoundsClickOcr escalation: no capture/ocr handle, returning Unverified"
+            );
+            return (false, VerificationEvidence::Unverified, None);
+        }
     };
+    let needle = match crate::targeting::profile::selector_text(req.selector) {
+        Some(t) => t,
+        None => {
+            tracing::info!(
+                target: "fastuse_win::targeting::execute",
+                "BoundsClickOcr escalation: selector has no text component"
+            );
+            return (false, VerificationEvidence::Unverified, None);
+        }
+    };
+    let region = match crate::targeting::profile::client_rect_via_uia(hwnd, req.uia) {
+        Some(r) if r.w > 0 && r.h > 0 => r,
+        _ => {
+            tracing::info!(
+                target: "fastuse_win::targeting::execute",
+                hwnd,
+                "BoundsClickOcr escalation: client rect unavailable"
+            );
+            return (false, VerificationEvidence::Unverified, None);
+        }
+    };
+    tracing::info!(
+        target: "fastuse_win::targeting::execute",
+        hwnd,
+        ?region,
+        needle = %needle,
+        "BoundsClickOcr escalation: re-resolving via OCR"
+    );
+    let hits =
+        crate::ocr::cropped::ocr_cropped_progressive(region, &needle, cap.clone(), ocr_h.clone())
+            .await;
+    let bounds = match hits.into_iter().next() {
+        Some(h) => h.bounds,
+        None => {
+            tracing::info!(
+                target: "fastuse_win::targeting::execute",
+                "BoundsClickOcr escalation: OCR returned no matches"
+            );
+            return (false, VerificationEvidence::Unverified, None);
+        }
+    };
+    tracing::info!(
+        target: "fastuse_win::targeting::execute",
+        ?bounds,
+        "BoundsClickOcr escalation: clicking OCR-derived bounds"
+    );
     let click_ok = perform_click_at_bounds(bounds, req).await;
     if !click_ok {
         return (false, VerificationEvidence::Unverified, None);
     }
-    // No reliable postcondition without caller hint. Caller's wait_for /
-    // expect (handled by run_strategy wrapper) provides verification.
     (false, VerificationEvidence::HitTestOnly, None)
 }
 

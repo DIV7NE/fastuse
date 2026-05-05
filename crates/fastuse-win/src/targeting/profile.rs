@@ -495,7 +495,7 @@ pub async fn profile_window_for_selector(
 /// selector kinds (`ByControlType`/`ByClass`/`ByAutomationId`) yield `None` —
 /// AutomationIds are not visible text and class names are framework strings,
 /// neither survives an OCR pass cleanly.
-fn selector_text(s: &fastuse_proto::Selector) -> Option<String> {
+pub(crate) fn selector_text(s: &fastuse_proto::Selector) -> Option<String> {
     use fastuse_proto::Selector;
     match s {
         Selector::ByName(n) if !n.is_empty() => Some(n.clone()),
@@ -510,7 +510,7 @@ fn selector_text(s: &fastuse_proto::Selector) -> Option<String> {
 
 /// `GetClientRect` mapped to virtual-desktop coords. Dispatched through the
 /// UIA pool worker so the underlying `windows::*` call honors D-25.
-fn client_rect_via_uia(hwnd: u64, uia: &Arc<UiaPoolHandle>) -> Option<Rect> {
+pub(crate) fn client_rect_via_uia(hwnd: u64, uia: &Arc<UiaPoolHandle>) -> Option<Rect> {
     uia.run(move |_automation| Ok(client_rect_inline(hwnd))).ok().flatten()
 }
 
