@@ -1,43 +1,29 @@
-//! fastuse-mcp — rmcp 1.6 stdio MCP server exposing the fastuse `ping` tool.
+//! fastuse-mcp — rmcp 1.6 stdio MCP server exposing the fastuse tool surface.
 
+mod client;
 mod handler;
 mod proto_io;
+mod server;
 mod spawn;
+pub mod tools;
 
-use fastuse_core::pipe_path_resolve;
-use fastuse_win::set_per_monitor_v2_first_call;
-use rmcp::transport::io::stdio;
-use rmcp::ServiceExt;
+fn main() -> anyhow::Result<()> {
+    fastuse_win::set_per_monitor_v2_first_call();
 
-use crate::handler::Fastuse;
-
-fn main() {
-    set_per_monitor_v2_first_call();
-
-    let identity = match pipe_path_resolve() {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fastuse-mcp: pipe path resolve failed: {e}");
-            std::process::exit(2);
-        }
-    };
+    // JSON structured logs to stderr so stdout remains clean for MCP framing.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .json()
+        .init();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
-        .build()
-        .expect("tokio runtime build");
+        .build()?;
 
-    if let Err(e) = rt.block_on(run(identity.path)) {
-        eprintln!("fastuse-mcp: {e}");
-        std::process::exit(1);
-    }
-}
-
-async fn run(pipe_path: String) -> anyhow::Result<()> {
-    let (read, write) = stdio();
-    let server = Fastuse::new(pipe_path);
-    let running = server.serve((read, write)).await?;
-    running.waiting().await?;
-    Ok(())
+    rt.block_on(server::run())
 }
