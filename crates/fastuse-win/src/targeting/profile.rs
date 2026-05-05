@@ -411,15 +411,128 @@ fn probe_tree_quality_uia(
 /// `profile_window` (signals, cached) with `resolve_candidates` (per-call;
 /// candidate identity is selector-dependent so it's not cached at the
 /// profile level).
-pub fn profile_window_for_selector(
+///
+/// When `capture` and `ocr` handles are supplied AND the selector carries a
+/// text component (`ByName` directly, or nested under `And`/`Or`), the
+/// profile call augments empty / degraded UIA results with OCR-derived
+/// `TargetCandidate::Ocr` entries. This is the only way an `execute_targeted`
+/// pipeline can reach the `BoundsClickOcr` tier on apps where UIA returns
+/// nothing (Electron without assistive tech, custom-rendered WPF like
+/// L-Connect3, native Direct2D / canvas surfaces).
+pub async fn profile_window_for_selector(
     hwnd: u64,
     selector: &fastuse_proto::Selector,
     uia: &Arc<UiaPoolHandle>,
+    capture: Option<&Arc<crate::capture_thread::CaptureThreadHandle>>,
+    ocr: Option<&Arc<crate::ocr_thread::OcrThreadHandle>>,
 ) -> Result<TargetProfile, ProfileError> {
     let mut profile = profile_window(hwnd, uia)?;
-    let candidates = crate::targeting::candidate::resolve_candidates(hwnd, selector, uia);
-    profile.candidates = candidates;
+    let uia_candidates = crate::targeting::candidate::resolve_candidates(hwnd, selector, uia);
+
+    // Healthy UIA + at least one candidate → done. Skip OCR.
+    let degraded = profile.window.uia_tree_quality == TreeQuality::Degraded;
+    if !uia_candidates.is_empty() && !degraded {
+        profile.candidates = uia_candidates;
+        return Ok(profile);
+    }
+
+    // OCR fallback condition: selector carries searchable text, capture +
+    // ocr handles available, AND (UIA empty OR tree degraded).
+    let needs_ocr = uia_candidates.is_empty() || degraded;
+    tracing::info!(
+        target: "fastuse_win::targeting::profile",
+        needs_ocr,
+        degraded,
+        uia_count = uia_candidates.len(),
+        has_capture = capture.is_some(),
+        has_ocr = ocr.is_some(),
+        selector_kind = ?std::mem::discriminant(selector),
+        "ocr_fallback decision",
+    );
+    let mut ocr_candidates: Vec<crate::targeting::candidate::TargetCandidate> = Vec::new();
+    if needs_ocr {
+        if let (Some(text), Some(cap), Some(ocr_h)) = (selector_text(selector), capture, ocr) {
+            tracing::info!(target: "fastuse_win::targeting::profile", text = %text, "ocr fallback firing");
+            // Resolve client rect via UIA pool worker (D-25 — windows::* not
+            // on tokio threads). Fall back to DWM extended frame on failure.
+            let region = client_rect_via_uia(hwnd, uia)
+                .unwrap_or(profile.window.dwm_extended_frame_bounds);
+            tracing::info!(target: "fastuse_win::targeting::profile", ?region, "ocr region resolved");
+            if region.w > 0 && region.h > 0 {
+                let hits = crate::ocr::cropped::ocr_cropped_progressive(
+                    region,
+                    &text,
+                    cap.clone(),
+                    ocr_h.clone(),
+                )
+                .await;
+                tracing::info!(target: "fastuse_win::targeting::profile", hit_count = hits.len(), "ocr hits");
+                ocr_candidates = hits
+                    .into_iter()
+                    .map(|h| crate::targeting::candidate::TargetCandidate::Ocr {
+                        text: h.text,
+                        bounds: h.bounds,
+                        score: (h.confidence * 0.85).clamp(0.0, 0.85),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    let mut all = uia_candidates;
+    all.extend(ocr_candidates);
+    all.sort_by(|a, b| {
+        b.score()
+            .partial_cmp(&a.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    profile.candidates = all;
     Ok(profile)
+}
+
+/// Extract a text component from the selector for OCR seeding. Returns the
+/// first `ByName` payload, recursing into `And`/`Or`. `Not` and the non-text
+/// selector kinds (`ByControlType`/`ByClass`/`ByAutomationId`) yield `None` —
+/// AutomationIds are not visible text and class names are framework strings,
+/// neither survives an OCR pass cleanly.
+fn selector_text(s: &fastuse_proto::Selector) -> Option<String> {
+    use fastuse_proto::Selector;
+    match s {
+        Selector::ByName(n) if !n.is_empty() => Some(n.clone()),
+        Selector::ByName(_) => None,
+        Selector::And(parts) | Selector::Or(parts) => parts.iter().find_map(selector_text),
+        Selector::Not(_)
+        | Selector::ByControlType(_)
+        | Selector::ByClass(_)
+        | Selector::ByAutomationId(_) => None,
+    }
+}
+
+/// `GetClientRect` mapped to virtual-desktop coords. Dispatched through the
+/// UIA pool worker so the underlying `windows::*` call honors D-25.
+fn client_rect_via_uia(hwnd: u64, uia: &Arc<UiaPoolHandle>) -> Option<Rect> {
+    uia.run(move |_automation| Ok(client_rect_inline(hwnd))).ok().flatten()
+}
+
+fn client_rect_inline(hwnd: u64) -> Option<Rect> {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    let mut r = RECT::default();
+    // SAFETY: HWND is the dispatcher-supplied target; RECT is a stack out-pointer.
+    unsafe { GetClientRect(h, &mut r) }.ok()?;
+    let mut origin = POINT { x: r.left, y: r.top };
+    // SAFETY: ClientToScreen takes HWND + POINT in/out pointer; both valid here.
+    if !unsafe { ClientToScreen(h, &mut origin) }.as_bool() {
+        return None;
+    }
+    Some(Rect {
+        x: origin.x,
+        y: origin.y,
+        w: (r.right - r.left).max(0),
+        h: (r.bottom - r.top).max(0),
+    })
 }
 
 fn read_integrity_level(h: windows::Win32::Foundation::HWND) -> IntegrityLevel {

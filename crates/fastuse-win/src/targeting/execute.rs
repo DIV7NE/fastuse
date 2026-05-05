@@ -72,7 +72,15 @@ pub async fn execute_targeted<'a>(req: TargetedRequest<'a>) -> Response {
         },
     };
 
-    let profile = match profile_window_for_selector(hwnd, req.selector, req.uia) {
+    let profile = match profile_window_for_selector(
+        hwnd,
+        req.selector,
+        req.uia,
+        req.capture,
+        req.ocr,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             return Response::Error(Error::new(
