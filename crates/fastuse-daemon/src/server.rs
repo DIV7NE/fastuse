@@ -27,6 +27,7 @@ pub async fn serve(
     idle_timeout_secs: u64,
     session_id: u32,
     allow: Vec<String>,
+    permissions: Arc<fastuse_win::permissions::Permissions>,
 ) -> std::io::Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let clock = Arc::new(ActivityClock::default());
@@ -93,6 +94,7 @@ pub async fn serve(
             idle_timeout_secs,
             session: Session::new(allow.clone()),
             scale: Arc::new(Mutex::new(ScaleStack::new())),
+            permissions: Arc::clone(&permissions),
         };
 
         tokio::spawn(async move {
