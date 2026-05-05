@@ -329,6 +329,207 @@ fn normalize_with_rect(
     (dx as i32, dy as i32)
 }
 
+// ── High-level shims for InputBackend ────────────────────────────────────────
+//
+// These thin wrappers present a stable API surface that `SendInputBackend`
+// calls.  They do NOT duplicate the internals of the existing primitives above;
+// they compose them.
+
+/// Mouse button discriminant used by the high-level shim API. Kept local to
+/// avoid pulling `fastuse_proto` into the trait boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    /// Primary (left) button.
+    Left,
+    /// Secondary (right) button.
+    Right,
+    /// Middle button.
+    Middle,
+}
+
+impl Button {
+    fn to_proto(self) -> fastuse_proto::MouseButton {
+        match self {
+            Button::Left => fastuse_proto::MouseButton::Left,
+            Button::Right => fastuse_proto::MouseButton::Right,
+            Button::Middle => fastuse_proto::MouseButton::Middle,
+        }
+    }
+}
+
+/// Scroll direction discriminant for the high-level shim API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDirection {
+    /// Scroll up (away from user).
+    Up,
+    /// Scroll down (toward user).
+    Down,
+    /// Scroll left.
+    Left,
+    /// Scroll right.
+    Right,
+}
+
+/// Modifier keys held during a click/drag. An empty `Modifiers` means no
+/// modifiers are held — the common case.
+#[derive(Debug, Clone, Default)]
+pub struct Modifiers {
+    /// Hold the left Ctrl key.
+    pub ctrl: bool,
+    /// Hold the left Shift key.
+    pub shift: bool,
+    /// Hold the left Alt key.
+    pub alt: bool,
+    /// Hold the left Win key.
+    pub win: bool,
+}
+
+const VK_LCONTROL: u16 = 0xA2;
+const VK_LSHIFT: u16 = 0xA0;
+const VK_LMENU: u16 = 0xA4;
+const VK_LWIN: u16 = 0x5B;
+
+/// Move the cursor to `(x, y)` in physical pixels (virtual-desktop origin)
+/// without pressing any buttons.
+pub fn mouse_move_absolute(x: i32, y: i32) -> Result<(), InputErr> {
+    send(&[mouse_absolute(x, y, MOUSEEVENTF_MOVE)])?;
+    Ok(())
+}
+
+/// Press and release `button` at the current cursor position `count` times,
+/// optionally holding `modifiers` throughout.
+pub fn mouse_click(button: Button, count: u32, modifiers: Modifiers) -> Result<(), InputErr> {
+    let mod_events = build_modifier_events(&modifiers, false);
+    let mod_up_events = build_modifier_events(&modifiers, true);
+
+    let mut events = mod_events;
+    let btn = button.to_proto();
+    for _ in 0..count.max(1) {
+        events.push(INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: mouse_button_flags(btn, false),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+        events.push(INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: mouse_button_flags(btn, true),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+    events.extend(mod_up_events);
+    send(&events)?;
+    Ok(())
+}
+
+/// Press `button` down at the current cursor position (no release).
+pub fn mouse_down(button: Button) -> Result<(), InputErr> {
+    let btn = button.to_proto();
+    send(&[INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: mouse_button_flags(btn, false),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }])?;
+    Ok(())
+}
+
+/// Release `button` at the current cursor position.
+pub fn mouse_up(button: Button) -> Result<(), InputErr> {
+    let btn = button.to_proto();
+    send(&[INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: mouse_button_flags(btn, true),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }])?;
+    Ok(())
+}
+
+/// Emit each character in `text` as a KEYEVENTF_UNICODE DOWN+UP pair.
+pub fn type_text(text: &str) -> Result<(), InputErr> {
+    let events = key_unicode_str(text);
+    if events.is_empty() {
+        return Ok(());
+    }
+    for chunk in events.chunks(256) {
+        send(chunk)?;
+    }
+    Ok(())
+}
+
+/// Press and release a chord of virtual-key codes. If `hold_ms` is provided the
+/// keys are held for that many milliseconds (implemented as a sleep) between
+/// down and up; otherwise down + up are sent back-to-back.
+pub fn key_chord(keys: &[u16], hold_ms: Option<u32>) -> Result<(), InputErr> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let down: Vec<INPUT> = keys.iter().map(|&vk| key_vk(vk, false)).collect();
+    send(&down)?;
+    if let Some(ms) = hold_ms {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+    let up: Vec<INPUT> = keys.iter().rev().map(|&vk| key_vk(vk, true)).collect();
+    send(&up)?;
+    Ok(())
+}
+
+/// Scroll at the current cursor position. `amount` is the number of wheel
+/// ticks (each tick = WHEEL_DELTA = 120 units).
+pub fn scroll(direction: ScrollDirection, amount: i32) -> Result<(), InputErr> {
+    const WHEEL_DELTA: i32 = 120;
+    let (horizontal, sign) = match direction {
+        ScrollDirection::Up => (false, 1),
+        ScrollDirection::Down => (false, -1),
+        ScrollDirection::Right => (true, 1),
+        ScrollDirection::Left => (true, -1),
+    };
+    send(&[mouse_wheel(horizontal, sign * amount * WHEEL_DELTA)])?;
+    Ok(())
+}
+
+/// Build modifier key-down or key-up events for a [`Modifiers`] set.
+fn build_modifier_events(modifiers: &Modifiers, up: bool) -> Vec<INPUT> {
+    let mut out = Vec::with_capacity(4);
+    if modifiers.ctrl  { out.push(key_vk(VK_LCONTROL, up)); }
+    if modifiers.shift { out.push(key_vk(VK_LSHIFT,   up)); }
+    if modifiers.alt   { out.push(key_vk(VK_LMENU,    up)); }
+    if modifiers.win   { out.push(key_vk(VK_LWIN,     up)); }
+    out
+}
+
+// ── End high-level shims ──────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
