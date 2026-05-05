@@ -1,12 +1,17 @@
-//! STA input thread skeleton (D-26).
+//! STA input thread (D-26).
 //!
 //! Owns a hidden message-only HWND and runs `GetMessage`/`DispatchMessage`.
-//! Phase 1 only acks `InputJob::Noop`; Phase 2 will plumb real input via
-//! `SendInput`. The hidden HWND is needed because some Win32 input messages
-//! (mouse hover, raw input, foreground tracking) require a window owner.
+//! All input jobs are dispatched through a [`crate::input::backend::InputBackend`]
+//! trait object. The default backend is
+//! [`crate::input::sendinput_backend::SendInputBackend`]; alternative backends
+//! (e.g. hardware HID, recording mock) can be injected via
+//! [`spawn_input_thread_with_backend`].
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+
+use crate::input::backend::{InputAction, InputBackend};
+use crate::input::sendinput_backend::SendInputBackend;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -29,7 +34,13 @@ pub enum InputJob {
     /// mono-typed; callers decode back to their concrete Response variant.
     Run(Box<dyn FnOnce() -> Result<serde_json::Value, fastuse_proto::Error> + Send>),
     /// Flush all currently-held modifiers (panic-hook / connection-drop).
+    /// Bypasses the backend entirely — modifier state lives outside the
+    /// backend abstraction (modifier_guard recovery path).
     FlushHeldModifiers,
+    /// Dispatch a single [`InputAction`] through the thread's
+    /// [`InputBackend`]. This is the primary entry point for the daemon's
+    /// `Request::Computer(...)` handler (Task 10 onwards).
+    Backend(InputAction),
 }
 
 impl std::fmt::Debug for InputJob {
@@ -38,6 +49,7 @@ impl std::fmt::Debug for InputJob {
             InputJob::Noop => write!(f, "InputJob::Noop"),
             InputJob::Run(_) => write!(f, "InputJob::Run(<fn>)"),
             InputJob::FlushHeldModifiers => write!(f, "InputJob::FlushHeldModifiers"),
+            InputJob::Backend(a) => write!(f, "InputJob::Backend({a:?})"),
         }
     }
 }
@@ -131,6 +143,25 @@ impl InputThreadHandle {
         }
     }
 
+    /// Dispatch an [`InputAction`] through the thread's [`InputBackend`].
+    /// Blocks until the action completes. Returns the backend error (if any)
+    /// wrapped in a [`fastuse_proto::Error`].
+    pub fn dispatch(&self, action: InputAction) -> Result<(), fastuse_proto::Error> {
+        match self.send_payload(InputJob::Backend(action)).map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                "input thread died — daemon must be restarted (Phase-3 will add respawn)"
+            );
+            fastuse_proto::Error::new(
+                fastuse_proto::ErrorCode::DaemonDead,
+                "input thread shut down".to_string(),
+            )
+        })? {
+            InputReplyPayload::Ack => Ok(()),
+            InputReplyPayload::Run(r) => r.map(|_| ()),
+        }
+    }
+
     fn send_payload(&self, job: InputJob) -> Result<InputReplyPayload, InputThreadError> {
         let (tx, rx) = mpsc::channel();
         self.sender
@@ -160,13 +191,22 @@ impl Drop for InputThreadHandle {
     }
 }
 
-fn run_job(job: InputJob) -> InputReplyPayload {
+fn run_job(job: InputJob, backend: &dyn InputBackend) -> InputReplyPayload {
     match job {
         InputJob::Noop => InputReplyPayload::Ack,
         InputJob::Run(f) => InputReplyPayload::Run(f()),
         InputJob::FlushHeldModifiers => {
             crate::input::handlers::flush_held_modifiers();
             InputReplyPayload::Ack
+        }
+        InputJob::Backend(action) => {
+            match backend.dispatch(action) {
+                Ok(()) => InputReplyPayload::Ack,
+                Err(e) => InputReplyPayload::Run(Err(fastuse_proto::Error::new(
+                    fastuse_proto::ErrorCode::Internal,
+                    format!("backend dispatch: {e}"),
+                ))),
+            }
         }
     }
 }
@@ -184,14 +224,33 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
+/// Spawn the STA input thread with a custom [`InputBackend`]. Returns a handle
+/// that signals shutdown on Drop. Prefer [`spawn_input_thread`] for production
+/// use; this entry point is primarily for tests that inject a recording mock.
+pub fn spawn_input_thread_with_backend(
+    backend: Box<dyn InputBackend>,
+) -> std::io::Result<InputThreadHandle> {
+    spawn_input_thread_inner(backend)
+}
+
 /// Spawn the STA input thread. Returns a handle that signals shutdown on Drop.
+/// The default backend is [`SendInputBackend`].
 pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
+    spawn_input_thread_inner(Box::new(SendInputBackend::new()))
+}
+
+fn spawn_input_thread_inner(
+    backend: Box<dyn InputBackend>,
+) -> std::io::Result<InputThreadHandle> {
     let (tx, rx) = mpsc::channel::<(InputJob, InputReply)>();
     let (id_tx, id_rx) = mpsc::channel::<u32>();
 
     let join = thread::Builder::new()
         .name("fastuse-input".into())
         .spawn(move || {
+            // The backend is owned by the worker thread for its entire lifetime.
+            let backend: Box<dyn InputBackend> = backend;
+
             // SAFETY: STA init for the input thread; matched by CoUninitialize.
             let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 
@@ -244,7 +303,7 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
             loop {
                 // Process any queued input jobs first.
                 while let Ok((job, reply)) = rx.try_recv() {
-                    let payload = run_job(job);
+                    let payload = run_job(job, &*backend);
                     let _ = reply.send(payload);
                 }
                 // SAFETY: GetMessageW blocks for the next OS message; HWND nullable.
@@ -259,7 +318,7 @@ pub fn spawn_input_thread() -> std::io::Result<InputThreadHandle> {
                 }
                 // After waking on WM_USER (job-queued nudge), drain again.
                 while let Ok((job, reply)) = rx.try_recv() {
-                    let payload = run_job(job);
+                    let payload = run_job(job, &*backend);
                     let _ = reply.send(payload);
                 }
             }
