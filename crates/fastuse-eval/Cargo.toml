@@ -1,0 +1,17 @@
+[package]
+name = "fastuse-eval"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = "0.8"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"

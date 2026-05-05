@@ -1,0 +1,17 @@
+name = "notepad-edit-save"
+tier = 1
+task = """
+Open Notepad. Type "Hello fastuse v2 eval". Save the file as
+%TEMP%\\fastuse-eval-notepad.txt. Close Notepad.
+"""
+timeout_seconds = 90
+
+[launch]
+command = "notepad.exe"
+args = []
+wait_for_window_title_substr = "Notepad"
+wait_timeout_ms = 5000
+
+[success]
+kind = "Shell"
+command = 'powershell -Command "if ((Get-Content $env:TEMP\\fastuse-eval-notepad.txt -Raw) -match \"Hello fastuse v2 eval\") { exit 0 } else { exit 1 }"'
