@@ -1047,7 +1047,12 @@ impl Fastuse {
     async fn computer(&self, Parameters(args): Parameters<ComputerArgs>) -> Result<CallToolResult, McpError> {
         let action: ComputerAction = serde_json::from_value(args.raw)
             .map_err(|e| McpError::invalid_params(format!("invalid computer action: {e}"), None))?;
-        let resp = self.call(Request::Computer(ComputerRequest { action: action.clone() })).await?;
+        let resp = self
+            .call(Request::Computer(ComputerRequest {
+                action: action.clone(),
+                coordinates_native: false,
+            }))
+            .await?;
         match resp {
             Response::Computer(result) => Ok(computer_tool::format_result(&action, result)),
             Response::Error(e) => Err(Self::err_from_proto(e)),
