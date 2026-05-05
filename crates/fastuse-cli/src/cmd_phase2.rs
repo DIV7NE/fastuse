@@ -72,8 +72,25 @@ pub(crate) fn print_action_or_ack(res: Response) -> anyhow::Result<()> {
             println!("{}", json!({"ok": true, "matched": matched}));
             Ok(())
         }
-        Response::ActionResult { ok, wait_matched, waited_ms, screenshot } => {
+        Response::ActionResult { verified, evidence, strategy_used, waited_ms, screenshot } => {
             use base64::Engine;
+            use fastuse_proto::wire::{Strategy, VerificationEvidence};
+            let evidence_s = match evidence {
+                VerificationEvidence::PostconditionMet => "postcondition_met",
+                VerificationEvidence::WaitForMatched => "wait_for_matched",
+                VerificationEvidence::HitTestOnly => "hit_test_only",
+                VerificationEvidence::Unverified => "unverified",
+            };
+            let strategy_s = match strategy_used {
+                Strategy::UiaInvoke => "uia_invoke",
+                Strategy::UiaToggle => "uia_toggle",
+                Strategy::UiaSelect => "uia_select",
+                Strategy::UiaExpandCollapse => "uia_expand_collapse",
+                Strategy::UiaSetValue => "uia_set_value",
+                Strategy::BoundsClickUia => "bounds_click_uia",
+                Strategy::BoundsClickOcr => "bounds_click_ocr",
+                Strategy::BoundsClickGeometry => "bounds_click_geometry",
+            };
             let screenshot = screenshot.map(|s| {
                 let s = *s;
                 json!({
@@ -84,8 +101,10 @@ pub(crate) fn print_action_or_ack(res: Response) -> anyhow::Result<()> {
                 })
             });
             println!("{}", json!({
-                "ok": ok,
-                "wait_matched": wait_matched,
+                "ok": verified,
+                "verified": verified,
+                "evidence": evidence_s,
+                "strategy_used": strategy_s,
                 "waited_ms": waited_ms,
                 "screenshot": screenshot,
             }));

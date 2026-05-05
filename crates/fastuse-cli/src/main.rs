@@ -351,9 +351,17 @@ struct ActionOptsArgs {
     /// Selector JSON to poll for after the action.
     #[arg(long)]
     wait_for: Option<String>,
-    /// Selector JSON to verify; if it doesn't match, action is reported failed.
+    /// Selector JSON that MUST match within timeout for `verified: true`.
+    /// Maps to `ExpectClause::SelectorMatches`.
     #[arg(long)]
+    expect_selector: Option<String>,
+    /// DEPRECATED: alias for `--expect-selector`. Removed in v1.1.
+    #[arg(long, hide = true)]
     verify: Option<String>,
+    /// Disable internal strategy escalation on verification miss
+    /// (`EscalatePolicy::Strict`).
+    #[arg(long, default_value_t = false)]
+    strict: bool,
     /// Capture a screenshot after the action.
     #[arg(long, default_value_t = false)]
     screenshot_after: bool,
@@ -369,11 +377,26 @@ struct ActionOptsArgs {
 }
 
 fn build_action_opts(a: ActionOptsArgs) -> anyhow::Result<Option<fastuse_proto::ActionOpts>> {
-    if a.wait_for.is_none() && a.verify.is_none() && !a.screenshot_after {
+    use fastuse_proto::wire::{EscalatePolicy, ExpectClause};
+    if a.wait_for.is_none()
+        && a.expect_selector.is_none()
+        && a.verify.is_none()
+        && !a.screenshot_after
+        && !a.strict
+        && a.wait_timeout_ms.is_none()
+    {
         return Ok(None);
     }
     let wait_for = a.wait_for.as_deref().map(serde_json::from_str).transpose()?;
-    let verify = a.verify.as_deref().map(serde_json::from_str).transpose()?;
+    // expect_selector takes precedence over the deprecated --verify alias.
+    let expect = match (a.expect_selector.as_deref(), a.verify.as_deref()) {
+        (Some(s), _) | (None, Some(s)) => {
+            let sel: fastuse_proto::Selector = serde_json::from_str(s)?;
+            Some(ExpectClause::SelectorMatches(sel))
+        }
+        (None, None) => None,
+    };
+    let escalate = if a.strict { Some(EscalatePolicy::Strict) } else { None };
     let screenshot_after = a.screenshot_after.then(|| {
         let region = match a.screenshot_region.as_deref() {
             Some("full") => None,
@@ -390,9 +413,10 @@ fn build_action_opts(a: ActionOptsArgs) -> anyhow::Result<Option<fastuse_proto::
     });
     Ok(Some(fastuse_proto::ActionOpts {
         wait_for,
+        expect,
         screenshot_after,
-        verify,
         wait_timeout_ms: a.wait_timeout_ms,
+        escalate,
     }))
 }
 

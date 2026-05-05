@@ -575,6 +575,9 @@ fn _types_used(_: MouseButton, _: ScrollDirection) {}
 fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &DispatchCtx) -> Response {
     let Some(opts) = opts else { return inner };
     let inner_ok = matches!(inner, Response::Ack { .. } | Response::Element { matched: true });
+    // Strategy is unknown at this layer — targeting::execute (Task 12) will
+    // refine it. Default to BoundsClickGeometry placeholder for pre-targeting
+    // / Phase 4 / bare-coord action arms.
     crate::action_opts::apply(
         opts,
         inner_ok,
@@ -582,6 +585,7 @@ fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &Disp
             uia: ctx.uia.as_ref(),
             capture: ctx.capture.as_ref(),
         },
+        fastuse_proto::wire::Strategy::BoundsClickGeometry,
     )
 }
 

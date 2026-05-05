@@ -1,6 +1,6 @@
 //! Post-action perception helper (`ActionOpts`).
 //!
-//! Exactly one entry point: `apply` runs `wait_for`, `verify`, and
+//! Exactly one entry point: `apply` runs `wait_for`, `expect`, and
 //! `screenshot_after` against the existing UIA pool + capture thread,
 //! returning a `Response::ActionResult` that bundles them. Inner action
 //! must have already executed before `apply` is called.
@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use fastuse_proto::wire::{ExpectClause, Strategy, VerificationEvidence};
 use fastuse_proto::{
     coords::Rect, ActionOpts, Error, ErrorCode, ImageFormat, RegionSpec, Response,
     ScreenshotPayload, Selector,
@@ -29,33 +30,70 @@ pub struct OptsCtx<'a> {
 
 /// Apply post-action perception. `inner_ok` reports whether the action
 /// itself succeeded; if false we still try to gather perception (best-effort)
-/// but mark `ok: false`.
-pub fn apply(opts: ActionOpts, inner_ok: bool, ctx: OptsCtx<'_>) -> Response {
+/// but mark `verified: false`. `strategy_used` is propagated from the caller
+/// (Phase 4 / pre-targeting paths pass a placeholder; refined by Task 12).
+pub fn apply(
+    opts: ActionOpts,
+    inner_ok: bool,
+    ctx: OptsCtx<'_>,
+    strategy_used: Strategy,
+) -> Response {
     let timeout_ms = opts.wait_timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
 
-    let (wait_matched, waited_ms) = match opts.wait_for.as_ref() {
-        None => (None, 0u32),
-        Some(sel) => {
-            let start = Instant::now();
-            let m = poll_selector(ctx.uia, sel.clone(), timeout_ms);
-            (Some(m), start.elapsed().as_millis() as u32)
-        }
-    };
+    let mut waited_ms: Option<u32> = None;
+    let mut evidence = VerificationEvidence::Unverified;
+    let mut verified = inner_ok;
 
-    let verify_ok = match opts.verify.as_ref() {
-        None => true,
-        Some(sel) => poll_selector(ctx.uia, sel.clone(), timeout_ms),
-    };
+    // wait_for: non-failing, populates evidence on match.
+    if let Some(sel) = opts.wait_for.as_ref() {
+        let start = Instant::now();
+        let matched = poll_selector(ctx.uia, sel.clone(), timeout_ms);
+        let ms = start.elapsed().as_millis() as u32;
+        waited_ms = Some(waited_ms.unwrap_or(0).saturating_add(ms));
+        if matched {
+            evidence = VerificationEvidence::WaitForMatched;
+            verified = inner_ok;
+        }
+    }
+
+    // expect: failing — timeout = verified false.
+    if let Some(exp) = opts.expect.as_ref() {
+        let start = Instant::now();
+        let matched = poll_expect(ctx.uia, exp, timeout_ms);
+        let ms = start.elapsed().as_millis() as u32;
+        waited_ms = Some(waited_ms.unwrap_or(0).saturating_add(ms));
+        if matched {
+            evidence = VerificationEvidence::WaitForMatched;
+            verified = inner_ok;
+        } else {
+            verified = false;
+        }
+    }
 
     let screenshot = opts
         .screenshot_after
         .and_then(|so| capture_after(ctx.capture, so).ok());
 
     Response::ActionResult {
-        ok: inner_ok && verify_ok,
-        wait_matched,
+        verified,
+        evidence,
+        strategy_used,
         waited_ms,
         screenshot: screenshot.map(Box::new),
+    }
+}
+
+/// Selector with hard-fail on timeout. Non-`SelectorMatches` variants of
+/// `ExpectClause` are honored by `targeting::execute` (Task 11); from this
+/// pre-targeting path we treat them as unsatisfied.
+fn poll_expect(
+    uia: Option<&Arc<UiaPoolHandle>>,
+    exp: &ExpectClause,
+    timeout_ms: u32,
+) -> bool {
+    match exp {
+        ExpectClause::SelectorMatches(sel) => poll_selector(uia, sel.clone(), timeout_ms),
+        _ => false,
     }
 }
 
