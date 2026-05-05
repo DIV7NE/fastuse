@@ -805,8 +805,16 @@ pub enum FrameError {
 
 /// Anthropic `computer_20251124` action enum. Coordinates are in scaled
 /// image-pixel space (per the per-session `ScaleStack` in `fastuse-win`).
+///
+/// **Wire encoding:** externally-tagged (`{"left_click": {...}}`) for
+/// postcard compatibility. `serde(tag = "action")` would be friendlier to
+/// Anthropic's `{"action": "left_click", ...}` JSON shape but postcard does
+/// not support internally-tagged enums (requires `deserialize_any`). The MCP
+/// boundary uses [`reshape_anthropic_action`] to convert Claude's
+/// internally-tagged JSON into this externally-tagged shape before
+/// deserializing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ComputerAction {
     /// Capture a screenshot.
     Screenshot {
@@ -943,6 +951,34 @@ pub enum ComputerAction {
 
 fn yes() -> bool { true }
 
+/// Convert Anthropic `computer_20251124`'s internally-tagged JSON shape
+/// (`{"action": "left_click", "coordinate": [..], ...}`) into the
+/// externally-tagged shape that [`ComputerAction`] expects on the wire
+/// (`{"left_click": {"coordinate": [..], ...}}`).
+///
+/// Used at the MCP boundary where Claude sends Anthropic-shape JSON. The CLI
+/// constructs `ComputerAction` variants directly and does not need this.
+pub fn reshape_anthropic_action(
+    mut v: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let obj = v
+        .as_object_mut()
+        .ok_or_else(|| "expected JSON object".to_string())?;
+    let action = obj
+        .remove("action")
+        .ok_or_else(|| "missing 'action' field".to_string())?;
+    let action_str = action
+        .as_str()
+        .ok_or_else(|| "'action' must be a string".to_string())?
+        .to_string();
+    let mut wrapped = serde_json::Map::new();
+    wrapped.insert(
+        action_str,
+        serde_json::Value::Object(std::mem::take(obj)),
+    );
+    Ok(serde_json::Value::Object(wrapped))
+}
+
 /// Scroll wheel direction for `ComputerAction::Scroll`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1058,9 +1094,10 @@ pub struct ListProcessesRequest {
     pub visible_only: bool,
 }
 
-/// Argument for the v2 `kill_process` MCP tool.
+/// Argument for the v2 `kill_process` MCP tool. Externally-tagged for
+/// postcard compatibility (see `ComputerAction` doc comment).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum KillProcessRequest {
     /// Kill by process ID.
     Pid {
@@ -1137,17 +1174,24 @@ mod computer_action_tests {
 
     #[test]
     fn screenshot_action_round_trips() {
+        // Externally-tagged on the wire (postcard requirement). The MCP layer
+        // uses `reshape_anthropic_action` to convert from Claude's internally-
+        // tagged shape; here we exercise the wire shape directly.
         let a = ComputerAction::Screenshot { monitor: Some(1) };
         let json = serde_json::to_string(&a).unwrap();
         let back: ComputerAction = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);
-        assert!(json.contains("\"action\":\"screenshot\""));
+        assert!(json.contains("\"screenshot\""));
     }
 
     #[test]
-    fn left_click_action_round_trips_with_humanize_default() {
-        let json = r#"{"action":"left_click","coordinate":[100,200]}"#;
-        let a: ComputerAction = serde_json::from_str(json).unwrap();
+    fn anthropic_shape_reshapes_to_wire_shape() {
+        // Claude sends Anthropic's internally-tagged shape; the MCP boundary
+        // calls reshape_anthropic_action before deserializing.
+        let claude_json: serde_json::Value =
+            serde_json::from_str(r#"{"action":"left_click","coordinate":[100,200]}"#).unwrap();
+        let reshaped = reshape_anthropic_action(claude_json).unwrap();
+        let a: ComputerAction = serde_json::from_value(reshaped).unwrap();
         match a {
             ComputerAction::LeftClick { coordinate, humanize, .. } => {
                 assert_eq!(coordinate, [100, 200]);
@@ -1158,13 +1202,38 @@ mod computer_action_tests {
     }
 
     #[test]
-    fn left_click_action_honors_explicit_humanize_false() {
-        let json = r#"{"action":"left_click","coordinate":[1,2],"humanize":false}"#;
-        let a: ComputerAction = serde_json::from_str(json).unwrap();
+    fn anthropic_shape_honors_explicit_humanize_false() {
+        let claude_json: serde_json::Value =
+            serde_json::from_str(r#"{"action":"left_click","coordinate":[1,2],"humanize":false}"#)
+                .unwrap();
+        let reshaped = reshape_anthropic_action(claude_json).unwrap();
+        let a: ComputerAction = serde_json::from_value(reshaped).unwrap();
         match a {
             ComputerAction::LeftClick { humanize, .. } => assert!(!humanize),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn reshape_rejects_missing_action_field() {
+        let bad: serde_json::Value =
+            serde_json::from_str(r#"{"coordinate":[1,2]}"#).unwrap();
+        assert!(reshape_anthropic_action(bad).is_err());
+    }
+
+    #[test]
+    fn postcard_round_trip_through_wire() {
+        // Critical: ComputerAction over postcard (the daemon pipe) must
+        // encode and decode cleanly. This was broken when the enum was
+        // internally-tagged.
+        let a = ComputerAction::LeftClick {
+            coordinate: [100, 200],
+            text: None,
+            humanize: true,
+        };
+        let bytes = postcard::to_allocvec(&a).unwrap();
+        let back: ComputerAction = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(a, back);
     }
 
     #[test]

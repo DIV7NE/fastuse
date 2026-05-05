@@ -1126,7 +1126,12 @@ impl Fastuse {
         description = "Drive the Windows desktop. Vision-first: take screenshots, then click coordinates returned by analyzing the image. Matches Anthropic computer_20251124 schema."
     )]
     async fn computer(&self, Parameters(args): Parameters<ComputerArgs>) -> Result<CallToolResult, McpError> {
-        let action: ComputerAction = serde_json::from_value(args.raw)
+        // Claude sends Anthropic's internally-tagged shape
+        // (`{"action": "left_click", ...}`); convert to the externally-tagged
+        // shape ComputerAction expects on the wire. See `wire::reshape_anthropic_action`.
+        let reshaped = fastuse_proto::wire::reshape_anthropic_action(args.raw)
+            .map_err(|e| McpError::invalid_params(format!("invalid computer action: {e}"), None))?;
+        let action: ComputerAction = serde_json::from_value(reshaped)
             .map_err(|e| McpError::invalid_params(format!("invalid computer action: {e}"), None))?;
         let resp = self
             .call(Request::Computer(ComputerRequest {

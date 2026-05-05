@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-cli"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-core"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "fastuse-proto",
  "serde",
@@ -418,9 +418,10 @@ dependencies = [
 
 [[package]]
 name = "fastuse-daemon"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "embed-resource",
  "fastuse-core",
@@ -441,8 +442,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastuse-eval"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fastuse-mcp"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -464,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-proto"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "postcard",
  "schemars",
@@ -475,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-win"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "base64",
  "dashmap",
@@ -1826,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "proc-macro2",

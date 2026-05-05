@@ -266,23 +266,16 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             finalize(inner, opts, ctx)
         }
         Request::ShellExec(se) => {
-            // Safe-mode check before allow-list resolution.
+            // v2 spec: default open. Only safe_mode gates.
             if let Err(resp) = safe_mode_gate(ctx, "shell_exec") {
                 resp
             } else {
-                let tier = perm::resolve("shell_exec", None, ctx.session.allow());
-                match tier {
-                    Tier::Blocked => err_blocked("shell_exec", "deny-list"),
-                    Tier::Confirmed => err_required("shell_exec"),
-                    Tier::Free => {
-                        let w = Instant::now();
-                        let r = fastuse_win::shell::shell_exec(se).await;
-                        win32_us = w.elapsed().as_micros() as i64;
-                        match r {
-                            Ok(res) => Response::ShellExec(res),
-                            Err(e) => Response::Error(e.to_wire()),
-                        }
-                    }
+                let w = Instant::now();
+                let r = fastuse_win::shell::shell_exec(se).await;
+                win32_us = w.elapsed().as_micros() as i64;
+                match r {
+                    Ok(res) => Response::ShellExec(res),
+                    Err(e) => Response::Error(e.to_wire()),
                 }
             }
         }
@@ -524,36 +517,19 @@ async fn gate_then<F>(
 where
     F: FnOnce(&DispatchCtx) -> (Result<Response, FastuseError>, i64),
 {
-    // Safe-mode check — overrides the allow-list.
+    // v2 spec: default open. Only safe_mode gates. The legacy Tier system
+    // (perm::resolve / FASTUSE_ALLOW) was replaced by safe_mode in v2.
+    let _ = target;
     if let Err(resp) = safe_mode_gate(ctx, tool) {
         return GateOutcome {
             result: Ok(resp),
             win32_us: 0,
         };
     }
-
-    match perm::resolve(tool, target, ctx.session.allow()) {
-        Tier::Blocked => GateOutcome {
-            result: Err(FastuseError::PermissionBlocked {
-                tool,
-                reason: "deny-list or daemon-self protection",
-            }),
-            win32_us: 0,
-        },
-        Tier::Confirmed => GateOutcome {
-            result: Err(FastuseError::PermissionRequired {
-                tool,
-                hint: perm::hint(tool),
-            }),
-            win32_us: 0,
-        },
-        Tier::Free => {
-            let (r, us) = f(ctx);
-            GateOutcome {
-                result: r,
-                win32_us: us,
-            }
-        }
+    let (r, us) = f(ctx);
+    GateOutcome {
+        result: r,
+        win32_us: us,
     }
 }
 
