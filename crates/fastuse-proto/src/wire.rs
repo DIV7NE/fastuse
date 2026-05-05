@@ -818,9 +818,9 @@ pub enum ComputerAction {
     LeftClick {
         /// Click position in scaled image-pixel space.
         coordinate: [i32; 2],
-        /// Modifier chord like `"ctrl+shift"`.
+        /// Modifier chord like `"ctrl+shift"`. Wrapped in `Redact` per D-10.
         #[serde(default)]
-        text: Option<String>,
+        text: Option<Redact<String>>,
         /// When true, apply Bezier-curve motion + timing jitter.
         #[serde(default = "yes")]
         humanize: bool,
@@ -868,8 +868,9 @@ pub enum ComputerAction {
         #[serde(default = "yes")]
         humanize: bool,
         /// Modifier chord held during drag (e.g. `"ctrl"` for copy-drag).
+        /// Wrapped in `Redact` per D-10.
         #[serde(default)]
-        text: Option<String>,
+        text: Option<Redact<String>>,
     },
     /// Press primary button without releasing. Composable for modifier drags.
     LeftMouseDown {
@@ -895,21 +896,22 @@ pub enum ComputerAction {
     CursorPosition,
     /// Type a string of literal Unicode text.
     Type {
-        /// Text to type.
-        text: String,
+        /// Text to type. Wrapped in `Redact` per D-10 — typed payloads are
+        /// the highest-leak surface.
+        text: Redact<String>,
         /// When true, apply per-keystroke timing jitter.
         #[serde(default = "yes")]
         humanize: bool,
     },
     /// Press a chord like `"ctrl+l"`, `"enter"`, `"alt+f4"`.
     Key {
-        /// Chord syntax (xdotool-style).
-        text: String,
+        /// Chord syntax (xdotool-style). Wrapped in `Redact` per D-10.
+        text: Redact<String>,
     },
     /// Press a chord and hold it for `duration` milliseconds before release.
     HoldKey {
-        /// Chord syntax (xdotool-style).
-        text: String,
+        /// Chord syntax (xdotool-style). Wrapped in `Redact` per D-10.
+        text: Redact<String>,
         /// Hold duration in milliseconds.
         duration: u32,
     },
@@ -1161,7 +1163,7 @@ mod computer_action_tests {
 
     #[test]
     fn key_chord_is_a_string_field() {
-        let a = ComputerAction::Key { text: "ctrl+s".into() };
+        let a = ComputerAction::Key { text: Redact::new("ctrl+s".into()) };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains("\"text\":\"ctrl+s\""));
     }
