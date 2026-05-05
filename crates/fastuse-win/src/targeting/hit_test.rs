@@ -48,24 +48,68 @@ pub fn verify_hit(
 }
 
 fn verify_on_uia_thread(
-    _automation: &uiautomation::UIAutomation,
+    automation: &uiautomation::UIAutomation,
     point: (i32, i32),
     expected_runtime_id: Option<&[i32]>,
     expected_bounds: Option<Rect>,
 ) -> HitTestVerdict {
-    // Implementer roadmap (plug in once the singleton accessor is exposed
-    // from uia_pool / walker — Task 4 follow-up):
-    // 1. Build a POINT { x: point.0, y: point.1 }.
-    // 2. Call automation.element_from_point(point) -> UIElement.
-    // 3. If runtime_id provided: compare hit_element.runtime_id() bytes to
-    //    the expected slice. Equal -> Match.
-    // 4. Else if bounds provided: read hit_element.bounding_rectangle() and
-    //    compute intersection-over-union. >= 0.7 -> Match.
-    // 5. Else (neither expected provided): Match (caller has no constraint).
-    // 6. Errors map to Unknown.
+    use uiautomation::types::{Point, UIProperty};
 
-    let _ = (point, expected_runtime_id, expected_bounds);
-    HitTestVerdict::Unknown
+    // Caller has no constraint — nothing to verify against.
+    if expected_runtime_id.is_none() && expected_bounds.is_none() {
+        return HitTestVerdict::Match;
+    }
+
+    // Build a one-shot CacheRequest covering the properties we need to read
+    // off the hit element without any `Current*` round-trips (UIA-12). Only
+    // BoundingRectangle is needed here — RuntimeId comes from
+    // `get_runtime_id()` (an instance accessor, not a `Current*` property).
+    let req = match automation.create_cache_request() {
+        Ok(r) => r,
+        Err(_) => return HitTestVerdict::Unknown,
+    };
+    if req.add_property(UIProperty::BoundingRectangle).is_err() {
+        return HitTestVerdict::Unknown;
+    }
+
+    let element = match automation
+        .element_from_point_build_cache(Point::new(point.0, point.1), &req)
+    {
+        Ok(e) => e,
+        Err(_) => return HitTestVerdict::Unknown,
+    };
+
+    if let Some(expected) = expected_runtime_id {
+        let hit_rid = match element.get_runtime_id() {
+            Ok(r) => r,
+            Err(_) => return HitTestVerdict::Unknown,
+        };
+        return if hit_rid.as_slice() == expected {
+            HitTestVerdict::Match
+        } else {
+            HitTestVerdict::Mismatch
+        };
+    }
+
+    if let Some(expected) = expected_bounds {
+        let rect = match element.get_cached_bounding_rectangle() {
+            Ok(r) => r,
+            Err(_) => return HitTestVerdict::Unknown,
+        };
+        let hit_bounds = Rect {
+            x: rect.get_left(),
+            y: rect.get_top(),
+            w: (rect.get_right() - rect.get_left()).max(0),
+            h: (rect.get_bottom() - rect.get_top()).max(0),
+        };
+        return if iou(hit_bounds, expected) >= 0.70 {
+            HitTestVerdict::Match
+        } else {
+            HitTestVerdict::Mismatch
+        };
+    }
+
+    HitTestVerdict::Match
 }
 
 /// Compute intersection-over-union for two rects.
