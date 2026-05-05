@@ -9,6 +9,7 @@
 
 #![deny(missing_docs)]
 
+pub mod config;
 pub mod error;
 pub mod hot_state;
 pub mod local_app_data;
