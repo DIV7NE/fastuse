@@ -5,11 +5,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fastuse_proto::{
     coords::{MonitorInfo, MouseButton, ScrollDirection, WindowInfo},
+    wire::{ComputerAction, ComputerRequest},
     Redact, Request, Response,
 };
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_router, ErrorData as McpError};
+
+use crate::tools::computer as computer_tool;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -381,6 +384,90 @@ pub struct InspectOutput {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ElementMatchOutput {
     pub matched: bool,
+}
+
+// ---------- computer_20251124 input schema ----------
+
+/// Raw input for the `computer` MCP tool.
+///
+/// The entire JSON object is forwarded to `serde_json::from_value::<ComputerAction>()`
+/// which uses the internal `action` tag to discriminate variants.  The
+/// `JsonSchema` impl returns the full `computer_20251124`-compatible schema.
+#[derive(Deserialize)]
+pub struct ComputerArgs {
+    #[serde(flatten)]
+    pub raw: serde_json::Value,
+}
+
+impl schemars::JsonSchema for ComputerArgs {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ComputerArgs".into()
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "screenshot", "left_click", "right_click", "middle_click",
+                        "double_click", "triple_click", "left_click_drag",
+                        "left_mouse_down", "left_mouse_up", "mouse_move",
+                        "cursor_position", "type", "key", "hold_key", "scroll",
+                        "wait", "zoom"
+                    ],
+                    "description": "The desktop action to perform."
+                },
+                "coordinate": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": "Target [x, y] in scaled image-pixel space."
+                },
+                "start_coordinate": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": "Drag start [x, y] for left_click_drag."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text for type/key/hold_key, or modifier chord for click actions."
+                },
+                "duration": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Hold/wait duration in milliseconds."
+                },
+                "scroll_direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"]
+                },
+                "scroll_amount": {
+                    "type": "integer",
+                    "description": "Number of wheel ticks."
+                },
+                "humanize": {
+                    "type": "boolean",
+                    "description": "Apply human-like motion and timing jitter (default true)."
+                },
+                "monitor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Monitor index for screenshot (default: foreground monitor)."
+                },
+                "zoom_factor": {
+                    "type": "number",
+                    "minimum": 1.0,
+                    "description": "Multiplicative zoom factor for zoom action (e.g. 2.5)."
+                }
+            },
+            "required": ["action"]
+        })
+    }
 }
 
 // ---------- Phase 4 input schemas ----------
@@ -939,6 +1026,30 @@ impl Fastuse {
             Response::Warmup { capture_us, uia_us, monitors_us, total_us } => {
                 Ok(Json(WarmupOutput { capture_us, uia_us, monitors_us, total_us }))
             }
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- Vision-first computer tool (Task 15) ----
+
+    /// Drive the Windows desktop. Vision-first: take screenshots, then click
+    /// coordinates returned by analyzing the image. Matches Anthropic
+    /// `computer_20251124` schema.
+    ///
+    /// Returns `ImageContent` inline for `screenshot` and `zoom` actions so
+    /// Claude sees the captured frame in the same turn. All other actions
+    /// return `TextContent` with a JSON summary (ok, action, cursor, scale).
+    #[tool(
+        name = "computer",
+        description = "Drive the Windows desktop. Vision-first: take screenshots, then click coordinates returned by analyzing the image. Matches Anthropic computer_20251124 schema."
+    )]
+    async fn computer(&self, Parameters(args): Parameters<ComputerArgs>) -> Result<CallToolResult, McpError> {
+        let action: ComputerAction = serde_json::from_value(args.raw)
+            .map_err(|e| McpError::invalid_params(format!("invalid computer action: {e}"), None))?;
+        let resp = self.call(Request::Computer(ComputerRequest { action: action.clone() })).await?;
+        match resp {
+            Response::Computer(result) => Ok(computer_tool::format_result(&action, result)),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }
