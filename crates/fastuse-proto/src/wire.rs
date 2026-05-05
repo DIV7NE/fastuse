@@ -42,88 +42,18 @@ pub struct ScreenshotOpts {
     pub quality: Option<u8>,
 }
 
-/// What level of evidence we have that the action achieved its intent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VerificationEvidence {
-    /// A typed postcondition matched (ToggleState flipped, IsSelected==true,
-    /// Value contains typed text, subtree mutation detected, etc.).
-    PostconditionMet,
-    /// Caller-provided `wait_for` / `expect::SelectorMatches` matched.
-    WaitForMatched,
-    /// Hit-test confirmed we struck the intended pixel; no postcondition was
-    /// applicable. Honest "we did what we could but cannot prove effect."
-    HitTestOnly,
-    /// Strategy ran but no contract applied and no caller hint was provided
-    /// (or contract failed a tolerance check).
-    Unverified,
-}
-
-/// Which strategy ultimately produced the result reported by `ActionResult`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Strategy {
-    /// `IUIAutomationInvokePattern::Invoke` — coord-free.
-    UiaInvoke,
-    /// `IUIAutomationTogglePattern::Toggle` — coord-free.
-    UiaToggle,
-    /// `IUIAutomationSelectionItemPattern::Select` — coord-free.
-    UiaSelect,
-    /// `IUIAutomationExpandCollapsePattern::Expand/Collapse` — coord-free.
-    UiaExpandCollapse,
-    /// `IUIAutomationValuePattern::SetValue` — coord-free; used by type_into.
-    UiaSetValue,
-    /// SendInput at DPI-correct center of UIA-reported bounds, gated by hit-test.
-    BoundsClickUia,
-    /// SendInput at DPI-correct center of OCR-derived bounds, gated by hit-test.
-    BoundsClickOcr,
-    /// SendInput at caller-provided coords, gated by hit-test.
-    BoundsClickGeometry,
-}
-
-/// Caller-supplied postcondition richer than a bare `wait_for` selector.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ExpectClause {
-    /// Some new top-level dialog/window appeared.
-    DialogOpens,
-    /// Foreground window's title now matches the substring.
-    WindowTitleMatches(String),
-    /// Foreground HWND now belongs to a window matching class/title.
-    ForegroundChangesTo {
-        /// Optional class-name substring filter.
-        class: Option<String>,
-        /// Optional title substring filter.
-        title: Option<String>,
-    },
-    /// A selector matches in the foreground tree (replaces old `verify`).
-    SelectorMatches(Selector),
-}
-
-/// Whether the daemon may escalate strategies internally on verification miss.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EscalatePolicy {
-    /// Full ladder for the chosen candidate kind (default).
-    Auto,
-    /// Single-shot, no escalation. For QA flows where a miss must surface.
-    Strict,
-}
-
 /// Optional post-action perception bundle — collapses perceive→act→perceive
 /// into a single tool call. Absent on legacy clients (decoded as `None`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionOpts {
     /// Non-failing wait: poll UIA after the action until this selector matches
-    /// or `wait_timeout_ms` elapses. Result populates `evidence`.
+    /// or `wait_timeout_ms` elapses.
     pub wait_for: Option<Selector>,
-    /// Failing wait + richer postconditions. Replaces the old `verify` field.
-    /// On timeout, the action is reported `verified: false`.
-    pub expect: Option<ExpectClause>,
-    /// Capture a screenshot after the action (and after `wait_for` / `expect`).
+    /// Capture a screenshot after the action (and after `wait_for`).
     pub screenshot_after: Option<ScreenshotOpts>,
-    /// Timeout shared by `wait_for`, `expect`, and postcondition polling.
+    /// Timeout shared by `wait_for` and postcondition polling.
     /// Default 2000ms when unset.
     pub wait_timeout_ms: Option<u32>,
-    /// Whether the daemon may escalate strategies internally on verification
-    /// miss. `None` = `Auto`.
-    pub escalate: Option<EscalatePolicy>,
 }
 
 /// Screenshot payload re-used by `ActionResult` and `Response::Screenshot`.
@@ -363,33 +293,6 @@ pub enum Request {
         x: i32,
         /// Probe y in physical pixels (virtual-desktop origin).
         y: i32,
-    },
-    /// Find an element via selector and click its centroid (delegates to
-    /// Phase 2 `input::click` after centroid resolution).
-    ClickElement {
-        /// Selector expression.
-        selector: Selector,
-        /// Modifier chord tokens to hold during the click.
-        modifiers: Option<Vec<String>>,
-        /// Optional post-action perception bundle.
-        opts: Option<ActionOpts>,
-    },
-    /// Find an element via selector, focus it, and type into it
-    /// (delegates to Phase 2 `input::type_text` after `SetFocus`).
-    TypeIntoElement {
-        /// Selector expression.
-        selector: Selector,
-        /// Unicode payload to type, redacted from logs (T-03-01).
-        text: Redact<String>,
-        /// Optional post-action perception bundle.
-        opts: Option<ActionOpts>,
-    },
-    /// Poll for an element until it appears or timeout.
-    WaitForElement {
-        /// Selector expression.
-        selector: Selector,
-        /// Timeout in milliseconds (default 5000 server-side).
-        timeout_ms: u32,
     },
     /// Scroll the matched element into view via `IUIAutomationScrollItemPattern`
     /// (or fallback `IUIAutomationScrollPattern` on the parent).
@@ -777,28 +680,11 @@ pub enum Response {
         /// True if the owning window's tree was degraded.
         degraded: bool,
     },
-    /// Result of `WaitForElement` and the boolean half of element actions.
+    /// Result of UIA element actions.
     Element {
         /// True if the selector resolved (or, for waits, found a match before
         /// timeout).
         matched: bool,
-    },
-    /// Action result with optional post-action perception. Used when the
-    /// caller passed `ActionOpts`. Without `opts`, dispatchers continue to
-    /// return `Ack` / `Element` as before.
-    ActionResult {
-        /// True if a typed postcondition matched, or caller `wait_for` /
-        /// `expect` matched. Never true without one of those.
-        verified: bool,
-        /// Tag describing what evidence we had.
-        evidence: VerificationEvidence,
-        /// Which strategy produced this result.
-        strategy_used: Strategy,
-        /// Wall-clock time spent in any postcondition / `wait_for` polling;
-        /// `None` when no polling occurred.
-        waited_ms: Option<u32>,
-        /// Optional post-action screenshot.
-        screenshot: Option<Box<ScreenshotPayload>>,
     },
 
     // --- Phase 4 ---
@@ -1152,20 +1038,6 @@ mod tests {
                 root_hwnd: None,
             },
             Request::InspectAtPoint { x: 100, y: 200 },
-            Request::ClickElement {
-                selector: Selector::ByName("OK".into()),
-                modifiers: Some(vec!["ctrl".into()]),
-                opts: None,
-            },
-            Request::TypeIntoElement {
-                selector: Selector::ByAutomationId("editor".into()),
-                text: Redact::new("hello".to_string()),
-                opts: None,
-            },
-            Request::WaitForElement {
-                selector: Selector::ByName("Loaded".into()),
-                timeout_ms: 1000,
-            },
             Request::ScrollIntoView {
                 selector: Selector::ByClass("ListItem".into()),
                 opts: None,
@@ -1222,7 +1094,6 @@ mod tests {
     #[test]
     fn click_with_action_opts_round_trips() {
         use crate::selector::Selector;
-        use crate::uia_node::ControlType;
         let req = Request::Click {
             x: 100,
             y: 200,
@@ -1232,70 +1103,18 @@ mod tests {
             skip_set_cursor_pos: false,
             opts: Some(ActionOpts {
                 wait_for: Some(Selector::ByName("Saved".into())),
-                expect: Some(ExpectClause::SelectorMatches(
-                    Selector::ByControlType(ControlType::Window),
-                )),
                 screenshot_after: Some(ScreenshotOpts {
                     region: Some(RegionSpec::Auto),
                     format: Some(ImageFormat::Jpeg),
                     quality: Some(85),
                 }),
                 wait_timeout_ms: Some(2000),
-                escalate: Some(EscalatePolicy::Auto),
             }),
         };
         let bytes = encode_frame(&req).unwrap();
         let mut cur = std::io::Cursor::new(bytes);
         let decoded: Request = decode_frame(&mut cur).unwrap();
         assert_eq!(req, decoded);
-    }
-
-    #[test]
-    fn action_result_round_trips_with_evidence() {
-        let res = Response::ActionResult {
-            verified: true,
-            evidence: VerificationEvidence::PostconditionMet,
-            strategy_used: Strategy::UiaInvoke,
-            waited_ms: Some(40),
-            screenshot: None,
-        };
-        let bytes = encode_frame(&res).unwrap();
-        let mut cur = std::io::Cursor::new(bytes);
-        let decoded: Response = decode_frame(&mut cur).unwrap();
-        assert_eq!(res, decoded);
-    }
-
-    #[test]
-    fn action_result_unverified_round_trips() {
-        let res = Response::ActionResult {
-            verified: false,
-            evidence: VerificationEvidence::Unverified,
-            strategy_used: Strategy::BoundsClickOcr,
-            waited_ms: None,
-            screenshot: None,
-        };
-        let bytes = encode_frame(&res).unwrap();
-        let mut cur = std::io::Cursor::new(bytes);
-        let decoded: Response = decode_frame(&mut cur).unwrap();
-        assert_eq!(res, decoded);
-    }
-
-    #[test]
-    fn expect_clause_variants_round_trip() {
-        let cases = vec![
-            ExpectClause::DialogOpens,
-            ExpectClause::WindowTitleMatches("Save".into()),
-            ExpectClause::ForegroundChangesTo {
-                class: Some("Notepad".into()),
-                title: None,
-            },
-            ExpectClause::SelectorMatches(Selector::ByName("OK".into())),
-        ];
-        for c in cases {
-            let bytes = postcard::to_allocvec(&c).unwrap();
-            let decoded: ExpectClause = postcard::from_bytes(&bytes).unwrap();
-            assert_eq!(c, decoded);
-        }
     }
 
     #[test]

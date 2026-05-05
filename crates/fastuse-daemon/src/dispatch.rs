@@ -36,10 +36,8 @@ use fastuse_win::capture::{handle_screenshot, handle_screenshot_region};
 use fastuse_win::capture_thread::CaptureThreadHandle;
 use fastuse_win::input::handlers as ih;
 use fastuse_win::input_thread::{InputJob, InputThreadHandle};
-use fastuse_win::ocr_thread::OcrThreadHandle;
 use fastuse_win::uia::{
     handle_inspect_at_point, handle_scroll_into_view, handle_uia_query, handle_uia_tree,
-    handle_wait_for_element,
 };
 use fastuse_win::uia_pool::UiaPoolHandle;
 use fastuse_win::window::{
@@ -59,8 +57,6 @@ pub struct DispatchCtx {
     pub uia: Option<Arc<UiaPoolHandle>>,
     /// Optional capture thread handle (Phase 3 perception).
     pub capture: Option<Arc<CaptureThreadHandle>>,
-    /// Optional OCR thread handle (targeting OCR-fallback tier).
-    pub ocr: Option<Arc<OcrThreadHandle>>,
     /// Cooperative shutdown signal.
     pub shutdown_flag: Arc<AtomicBool>,
     /// Reconciled idle timeout reported on every Welcome (D-22).
@@ -389,75 +385,6 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
-        Request::ClickElement { selector, modifiers, opts } => {
-            use fastuse_win::targeting::strategy::Intent;
-            use fastuse_win::targeting::{execute_targeted, TargetedRequest};
-            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
-                (Some(uia), Some(input)) => {
-                    let w_start = Instant::now();
-                    let modifiers_owned = modifiers.unwrap_or_default();
-                    let req = TargetedRequest {
-                        selector: &selector,
-                        modifiers: Some(&modifiers_owned),
-                        opts: opts.as_ref(),
-                        intent: Intent::Click,
-                        typed_text: None,
-                        root_hwnd: None,
-                        uia,
-                        input,
-                        capture: ctx.capture.as_ref(),
-                        ocr: ctx.ocr.as_ref(),
-                    };
-                    let resp = execute_targeted(req).await;
-                    win32_us = w_start.elapsed().as_micros() as i64;
-                    resp
-                }
-                _ => Response::Error(Error::new(
-                    ErrorCode::Internal,
-                    "uia pool or input thread unavailable".to_string(),
-                )),
-            }
-        }
-        Request::TypeIntoElement { selector, text, opts } => {
-            use fastuse_win::targeting::strategy::Intent;
-            use fastuse_win::targeting::{execute_targeted, TargetedRequest};
-            match (ctx.uia.as_ref(), ctx.input.as_ref()) {
-                (Some(uia), Some(input)) => {
-                    let w_start = Instant::now();
-                    let req = TargetedRequest {
-                        selector: &selector,
-                        modifiers: None,
-                        opts: opts.as_ref(),
-                        intent: Intent::Type,
-                        typed_text: Some(&text),
-                        root_hwnd: None,
-                        uia,
-                        input,
-                        capture: ctx.capture.as_ref(),
-                        ocr: ctx.ocr.as_ref(),
-                    };
-                    let resp = execute_targeted(req).await;
-                    win32_us = w_start.elapsed().as_micros() as i64;
-                    resp
-                }
-                _ => Response::Error(Error::new(
-                    ErrorCode::Internal,
-                    "uia pool or input thread unavailable".to_string(),
-                )),
-            }
-        }
-        Request::WaitForElement { selector, timeout_ms } => match ctx.uia.as_ref() {
-            None => Response::Error(Error::new(
-                ErrorCode::Internal,
-                "uia pool unavailable".to_string(),
-            )),
-            Some(uia) => {
-                let w_start = Instant::now();
-                let r = handle_wait_for_element(uia, selector, timeout_ms);
-                win32_us = w_start.elapsed().as_micros() as i64;
-                r.unwrap_or_else(Response::Error)
-            }
-        },
         Request::ScrollIntoView { selector, opts } => {
             let inner = match ctx.uia.as_ref() {
                 None => Response::Error(Error::new(
@@ -604,18 +531,13 @@ fn _types_used(_: MouseButton, _: ScrollDirection) {}
 /// unchanged when `opts` is `None`; otherwise delegates to `action_opts::apply`.
 fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &DispatchCtx) -> Response {
     let Some(opts) = opts else { return inner };
-    let inner_ok = matches!(inner, Response::Ack { .. } | Response::Element { matched: true });
-    // Strategy is unknown at this layer — targeting::execute (Task 12) will
-    // refine it. Default to BoundsClickGeometry placeholder for pre-targeting
-    // / Phase 4 / bare-coord action arms.
     crate::action_opts::apply(
         opts,
-        inner_ok,
+        inner,
         crate::action_opts::OptsCtx {
             uia: ctx.uia.as_ref(),
             capture: ctx.capture.as_ref(),
         },
-        fastuse_proto::wire::Strategy::BoundsClickGeometry,
     )
 }
 
@@ -630,7 +552,6 @@ mod tests {
             input: None,
             uia: None,
             capture: None,
-            ocr: None,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             idle_timeout_secs: 300,
             session: Session::new(allow),

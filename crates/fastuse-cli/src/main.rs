@@ -259,33 +259,6 @@ enum Cmd {
         /// Probe y in physical pixels.
         y: i32,
     },
-    /// Find an element via selector and click its centroid.
-    ClickElement {
-        /// Selector JSON.
-        selector: String,
-        /// Modifier list, e.g. ctrl,shift.
-        #[arg(long)]
-        mods: Option<String>,
-        #[command(flatten)]
-        opts: ActionOptsArgs,
-    },
-    /// Find an element via selector, focus it, type text.
-    TypeIntoElement {
-        /// Selector JSON.
-        selector: String,
-        /// Text to type (Redact<>-wrapped end-to-end).
-        text: String,
-        #[command(flatten)]
-        opts: ActionOptsArgs,
-    },
-    /// Poll for an element until it appears or timeout.
-    WaitForElement {
-        /// Selector JSON.
-        selector: String,
-        /// Timeout in milliseconds (0 = default 5000).
-        #[arg(long, default_value_t = 0)]
-        timeout_ms: u32,
-    },
     /// Scroll the matched element into view.
     ScrollIntoView {
         /// Selector JSON.
@@ -369,17 +342,6 @@ struct ActionOptsArgs {
     /// Selector JSON to poll for after the action.
     #[arg(long)]
     wait_for: Option<String>,
-    /// Selector JSON that MUST match within timeout for `verified: true`.
-    /// Maps to `ExpectClause::SelectorMatches`.
-    #[arg(long)]
-    expect_selector: Option<String>,
-    /// DEPRECATED: alias for `--expect-selector`. Removed in v1.1.
-    #[arg(long, hide = true)]
-    verify: Option<String>,
-    /// Disable internal strategy escalation on verification miss
-    /// (`EscalatePolicy::Strict`).
-    #[arg(long, default_value_t = false)]
-    strict: bool,
     /// Capture a screenshot after the action.
     #[arg(long, default_value_t = false)]
     screenshot_after: bool,
@@ -395,26 +357,13 @@ struct ActionOptsArgs {
 }
 
 fn build_action_opts(a: ActionOptsArgs) -> anyhow::Result<Option<fastuse_proto::ActionOpts>> {
-    use fastuse_proto::wire::{EscalatePolicy, ExpectClause};
     if a.wait_for.is_none()
-        && a.expect_selector.is_none()
-        && a.verify.is_none()
         && !a.screenshot_after
-        && !a.strict
         && a.wait_timeout_ms.is_none()
     {
         return Ok(None);
     }
     let wait_for = a.wait_for.as_deref().map(serde_json::from_str).transpose()?;
-    // expect_selector takes precedence over the deprecated --verify alias.
-    let expect = match (a.expect_selector.as_deref(), a.verify.as_deref()) {
-        (Some(s), _) | (None, Some(s)) => {
-            let sel: fastuse_proto::Selector = serde_json::from_str(s)?;
-            Some(ExpectClause::SelectorMatches(sel))
-        }
-        (None, None) => None,
-    };
-    let escalate = if a.strict { Some(EscalatePolicy::Strict) } else { None };
     let screenshot_after = a.screenshot_after.then(|| {
         let region = match a.screenshot_region.as_deref() {
             Some("full") => None,
@@ -431,10 +380,8 @@ fn build_action_opts(a: ActionOptsArgs) -> anyhow::Result<Option<fastuse_proto::
     });
     Ok(Some(fastuse_proto::ActionOpts {
         wait_for,
-        expect,
         screenshot_after,
         wait_timeout_ms: a.wait_timeout_ms,
-        escalate,
     }))
 }
 
@@ -569,17 +516,6 @@ fn main() {
                 cmd_phase3::uia_query(&identity.path, &selector, root).await
             }
             Cmd::InspectAt { x, y } => cmd_phase3::inspect_at_point(&identity.path, x, y).await,
-            Cmd::ClickElement { selector, mods, opts } => {
-                let opts = build_action_opts(opts)?;
-                cmd_phase3::click_element(&identity.path, &selector, mods.as_deref(), opts).await
-            }
-            Cmd::TypeIntoElement { selector, text, opts } => {
-                let opts = build_action_opts(opts)?;
-                cmd_phase3::type_into_element(&identity.path, &selector, text, opts).await
-            }
-            Cmd::WaitForElement { selector, timeout_ms } => {
-                cmd_phase3::wait_for_element(&identity.path, &selector, timeout_ms).await
-            }
             Cmd::ScrollIntoView { selector, opts } => {
                 let opts = build_action_opts(opts)?;
                 cmd_phase3::scroll_into_view(&identity.path, &selector, opts).await

@@ -24,15 +24,11 @@ pub mod dpi;
 pub mod input;
 pub mod input_thread;
 pub mod launch;
-pub mod ocr;
-pub mod ocr_thread;
 pub mod process;
 pub mod shell;
-pub mod targeting;
 pub mod uia;
 pub mod uia_pool;
 pub mod window;
 
 pub use com::increment_mta_once;
 pub use dpi::set_per_monitor_v2_first_call;
-pub use ocr_thread::{spawn_ocr_thread, OcrThreadError, OcrThreadHandle};

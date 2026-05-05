@@ -11,9 +11,8 @@
 //! - `input_thread` — STA, hosts SendInput synthesis
 //! - `uia_pool` — MTA worker pool, hosts `IUIAutomation` queries
 //! - `capture_thread` — MTA, hosts D3D11 + DXGI desktop duplication
-//! - `ocr_thread` — MTA, hosts `Windows.Media.Ocr::OcrEngine`
 //!
-//! Adding a fifth COM-thread surface requires extending this list.
+//! Adding a fourth COM-thread surface requires extending this list.
 //!
 //! # Known limits (WR-08)
 //!

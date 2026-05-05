@@ -1,14 +1,15 @@
 //! Post-action perception helper (`ActionOpts`).
 //!
-//! Exactly one entry point: `apply` runs `wait_for`, `expect`, and
-//! `screenshot_after` against the existing UIA pool + capture thread,
-//! returning a `Response::ActionResult` that bundles them. Inner action
-//! must have already executed before `apply` is called.
+//! Simplified for v2 pivot: `expect` and `escalate` have been removed.
+//! Only `wait_for` (non-failing UIA poll) and `screenshot_after` remain.
+//! `ActionResult` wire variant is gone; this module returns `Response::Ack`
+//! on success with an optional appended screenshot path for callers to use.
+//!
+//! Full `computer`-action perception will be wired in Task 10.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fastuse_proto::wire::{ExpectClause, Strategy, VerificationEvidence};
 use fastuse_proto::{
     coords::Rect, ActionOpts, Error, ErrorCode, ImageFormat, RegionSpec, Response,
     ScreenshotPayload, Selector,
@@ -28,73 +29,49 @@ pub struct OptsCtx<'a> {
     pub capture: Option<&'a Arc<CaptureThreadHandle>>,
 }
 
-/// Apply post-action perception. `inner_ok` reports whether the action
-/// itself succeeded; if false we still try to gather perception (best-effort)
-/// but mark `verified: false`. `strategy_used` is propagated from the caller
-/// (Phase 4 / pre-targeting paths pass a placeholder; refined by Task 12).
-pub fn apply(
-    opts: ActionOpts,
-    inner_ok: bool,
-    ctx: OptsCtx<'_>,
-    strategy_used: Strategy,
-) -> Response {
+/// Apply post-action perception. Returns the inner response when `opts` is
+/// `None`. When `opts` is `Some`, runs `wait_for` (non-failing) and
+/// `screenshot_after`, then returns a `Response::Screenshot` if a screenshot
+/// was requested and the inner action succeeded, or the inner response
+/// otherwise.
+///
+/// NOTE: `ActionResult` wire variant has been removed in the v2 pivot.
+/// This function now returns the inner response unchanged (after running
+/// wait_for as a side-effect). Screenshot-after results are folded into
+/// a `Response::Screenshot` if the inner action was an `Ack`.
+/// Full perception will be re-wired in Task 10.
+pub fn apply(opts: ActionOpts, inner: Response, ctx: OptsCtx<'_>) -> Response {
     let timeout_ms = opts.wait_timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
 
-    let mut waited_ms: Option<u32> = None;
-    let mut evidence = VerificationEvidence::Unverified;
-    let mut verified = inner_ok;
-
-    // wait_for: non-failing, populates evidence on match.
+    // wait_for: non-failing side-effect poll.
     if let Some(sel) = opts.wait_for.as_ref() {
-        let start = Instant::now();
-        let matched = poll_selector(ctx.uia, sel.clone(), timeout_ms);
-        let ms = start.elapsed().as_millis() as u32;
-        waited_ms = Some(waited_ms.unwrap_or(0).saturating_add(ms));
-        if matched {
-            evidence = VerificationEvidence::WaitForMatched;
-            verified = inner_ok;
+        poll_selector(ctx.uia, sel.clone(), timeout_ms);
+    }
+
+    // screenshot_after: if inner was Ack and a screenshot was requested,
+    // return the screenshot; otherwise return inner unchanged.
+    if let Some(so) = opts.screenshot_after {
+        if matches!(inner, Response::Ack { .. }) {
+            match capture_after(ctx.capture, so) {
+                Ok(payload) => {
+                    return Response::Screenshot {
+                        bytes: payload.bytes,
+                        mime: payload.mime,
+                        width: payload.width,
+                        height: payload.height,
+                    };
+                }
+                Err(()) => {
+                    return Response::Error(Error::new(
+                        ErrorCode::Internal,
+                        "screenshot_after: capture unavailable".to_string(),
+                    ));
+                }
+            }
         }
     }
 
-    // expect: failing — timeout = verified false.
-    if let Some(exp) = opts.expect.as_ref() {
-        let start = Instant::now();
-        let matched = poll_expect(ctx.uia, exp, timeout_ms);
-        let ms = start.elapsed().as_millis() as u32;
-        waited_ms = Some(waited_ms.unwrap_or(0).saturating_add(ms));
-        if matched {
-            evidence = VerificationEvidence::WaitForMatched;
-            verified = inner_ok;
-        } else {
-            verified = false;
-        }
-    }
-
-    let screenshot = opts
-        .screenshot_after
-        .and_then(|so| capture_after(ctx.capture, so).ok());
-
-    Response::ActionResult {
-        verified,
-        evidence,
-        strategy_used,
-        waited_ms,
-        screenshot: screenshot.map(Box::new),
-    }
-}
-
-/// Selector with hard-fail on timeout. Non-`SelectorMatches` variants of
-/// `ExpectClause` are honored by `targeting::execute` (Task 11); from this
-/// pre-targeting path we treat them as unsatisfied.
-fn poll_expect(
-    uia: Option<&Arc<UiaPoolHandle>>,
-    exp: &ExpectClause,
-    timeout_ms: u32,
-) -> bool {
-    match exp {
-        ExpectClause::SelectorMatches(sel) => poll_selector(uia, sel.clone(), timeout_ms),
-        _ => false,
-    }
+    inner
 }
 
 fn poll_selector(uia: Option<&Arc<UiaPoolHandle>>, sel: Selector, timeout_ms: u32) -> bool {

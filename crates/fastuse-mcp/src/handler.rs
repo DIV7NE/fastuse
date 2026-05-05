@@ -77,36 +77,17 @@ pub struct AckOutput {
     pub slept_us: Option<u64>,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
-pub struct ActionResultOutput {
-    /// DEPRECATED: alias for `verified`. Kept for one release; removed in v1.1.
-    /// Existing agents branching on `result.ok` continue to work.
-    pub ok: bool,
-    /// True iff a typed postcondition matched or caller `wait_for`/`expect`
-    /// matched. The contract callers should branch on going forward.
-    pub verified: bool,
-    /// Evidence tag (snake_case): `postcondition_met`, `wait_for_matched`,
-    /// `hit_test_only`, or `unverified`.
-    pub evidence: String,
-    /// Strategy used (snake_case), e.g. `uia_invoke`, `bounds_click_uia`.
-    pub strategy_used: String,
-    /// Polling time in milliseconds, if any.
-    pub waited_ms: Option<u32>,
-    /// Optional post-action screenshot.
-    pub screenshot: Option<ScreenshotOutput>,
-}
-
 /// Untagged union returned by every action tool.
 ///
 /// - `Ack`     — action completed, no post-action opts triggered.
 /// - `Element` — element-targeted action (matched=true/false).
-/// - `Result`  — action completed with post-action opts (wait / screenshot).
+/// - `Screenshot` — action completed with screenshot_after (v2 transition).
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ActionOrAck {
     Ack(AckOutput),
     Element(ElementMatchOutput),
-    Result(ActionResultOutput),
+    Screenshot(ScreenshotOutput),
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -125,51 +106,27 @@ pub struct ActionOptsArgs {
     /// UIA selector JSON to poll after the action until it matches.
     /// Default timeout 2000ms; override via `wait_timeout_ms`.
     pub wait_for: Option<serde_json::Value>,
-    /// DEPRECATED: alias for `expect_selector`. Kept for one release; removed
-    /// in v1.1. Maps to `ExpectClause::SelectorMatches`.
-    pub verify: Option<serde_json::Value>,
-    /// Selector that MUST match within timeout for the action to be reported
-    /// `verified: true`. Replaces `verify`.
-    pub expect_selector: Option<serde_json::Value>,
     /// Capture a screenshot after the action (and after `wait_for` if set).
     /// Pass `true` for full-primary-monitor JPEG. Pass `"png"` or
     /// `{ "region": "auto", "format": "png" }` for more control.
-    /// All formats resolve to `ActionResultOutput.screenshot`.
     pub screenshot_after: Option<serde_json::Value>,
-    /// Timeout shared by `wait_for` and `expect`/`verify` in milliseconds.
+    /// Timeout shared by `wait_for` in milliseconds.
     pub wait_timeout_ms: Option<u32>,
-    /// If true, the daemon will not escalate strategies internally on
-    /// verification miss (`EscalatePolicy::Strict`).
-    pub strict: Option<bool>,
 }
 
 fn build_action_opts(a: ActionOptsArgs) -> Result<Option<fastuse_proto::ActionOpts>, McpError> {
-    use fastuse_proto::wire::{EscalatePolicy, ExpectClause};
     use fastuse_proto::{ActionOpts, RegionSpec, ScreenshotOpts, ImageFormat};
 
     // If no opts fields are set at all, propagate None so legacy dispatch
     // returns Response::Ack / Response::Element unchanged.
     if a.wait_for.is_none()
-        && a.verify.is_none()
-        && a.expect_selector.is_none()
         && a.screenshot_after.is_none()
         && a.wait_timeout_ms.is_none()
-        && a.strict.is_none()
     {
         return Ok(None);
     }
 
     let wait_for = a.wait_for.map(parse_selector).transpose()?;
-    // expect_selector takes precedence over the deprecated `verify` alias;
-    // both map to ExpectClause::SelectorMatches.
-    let expect = match (a.expect_selector, a.verify) {
-        (Some(v), _) | (None, Some(v)) => Some(ExpectClause::SelectorMatches(parse_selector(v)?)),
-        (None, None) => None,
-    };
-    let escalate = match a.strict {
-        Some(true) => Some(EscalatePolicy::Strict),
-        _ => None,
-    };
 
     // `screenshot_after` accepts three shapes:
     //  - `true`           → full primary monitor JPEG (most common agent use case)
@@ -217,35 +174,9 @@ fn build_action_opts(a: ActionOptsArgs) -> Result<Option<fastuse_proto::ActionOp
 
     Ok(Some(ActionOpts {
         wait_for,
-        expect,
         screenshot_after,
         wait_timeout_ms: a.wait_timeout_ms,
-        escalate,
     }))
-}
-
-fn evidence_str(e: fastuse_proto::wire::VerificationEvidence) -> &'static str {
-    use fastuse_proto::wire::VerificationEvidence;
-    match e {
-        VerificationEvidence::PostconditionMet => "postcondition_met",
-        VerificationEvidence::WaitForMatched => "wait_for_matched",
-        VerificationEvidence::HitTestOnly => "hit_test_only",
-        VerificationEvidence::Unverified => "unverified",
-    }
-}
-
-fn strategy_str(s: fastuse_proto::wire::Strategy) -> &'static str {
-    use fastuse_proto::wire::Strategy;
-    match s {
-        Strategy::UiaInvoke => "uia_invoke",
-        Strategy::UiaToggle => "uia_toggle",
-        Strategy::UiaSelect => "uia_select",
-        Strategy::UiaExpandCollapse => "uia_expand_collapse",
-        Strategy::UiaSetValue => "uia_set_value",
-        Strategy::BoundsClickUia => "bounds_click_uia",
-        Strategy::BoundsClickOcr => "bounds_click_ocr",
-        Strategy::BoundsClickGeometry => "bounds_click_geometry",
-    }
 }
 
 // ---------- input schemas ----------
@@ -416,30 +347,6 @@ pub struct UiaQueryArgs {
 pub struct InspectAtPointArgs {
     pub x: i32,
     pub y: i32,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ClickElementArgs {
-    pub selector: serde_json::Value,
-    #[serde(default)]
-    pub modifiers: Option<Vec<String>>,
-    #[serde(flatten, default)]
-    pub opts: ActionOptsArgs,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct TypeIntoElementArgs {
-    pub selector: serde_json::Value,
-    pub text: String,
-    #[serde(flatten, default)]
-    pub opts: ActionOptsArgs,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct WaitForElementArgs {
-    pub selector: serde_json::Value,
-    #[serde(default)]
-    pub timeout_ms: u32,
 }
 
 // ---------- Phase 3 output schemas ----------
@@ -864,29 +771,6 @@ impl Fastuse {
         }
     }
 
-    #[tool(name = "click_element", description = "Find an element via selector and click its centroid. Delegates to phase2 click after centroid resolution.")]
-    async fn click_element(&self, Parameters(args): Parameters<ClickElementArgs>) -> Result<Json<ActionOrAck>, McpError> {
-        let selector = parse_selector(args.selector)?;
-        let opts = build_action_opts(args.opts)?;
-        let req = Request::ClickElement { selector, modifiers: args.modifiers, opts };
-        action_or_ack_response(self.call(req).await?)
-    }
-
-    #[tool(name = "type_into_element", description = "Find an element via selector, focus it, type text. Payload is redacted from logs.")]
-    async fn type_into_element(&self, Parameters(args): Parameters<TypeIntoElementArgs>) -> Result<Json<ActionOrAck>, McpError> {
-        let selector = parse_selector(args.selector)?;
-        let opts = build_action_opts(args.opts)?;
-        let req = Request::TypeIntoElement { selector, text: Redact::new(args.text), opts };
-        action_or_ack_response(self.call(req).await?)
-    }
-
-    #[tool(name = "wait_for_element", description = "Poll for an element until it appears or timeout (default 5000ms). Returns matched=true/false.")]
-    async fn wait_for_element(&self, Parameters(args): Parameters<WaitForElementArgs>) -> Result<Json<ElementMatchOutput>, McpError> {
-        let selector = parse_selector(args.selector)?;
-        let req = Request::WaitForElement { selector, timeout_ms: args.timeout_ms };
-        element_response(self.call(req).await?)
-    }
-
     #[tool(name = "scroll_into_view", description = "Scroll the matched element into view via UIA ScrollItemPattern.")]
     async fn scroll_into_view(&self, Parameters(args): Parameters<SelectorArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let selector = parse_selector(args.selector)?;
@@ -1066,24 +950,10 @@ fn action_or_ack_response(res: Response) -> Result<Json<ActionOrAck>, McpError> 
     match res {
         Response::Ack { slept_us } => Ok(Json(ActionOrAck::Ack(AckOutput { ok: true, slept_us }))),
         Response::Element { matched } => Ok(Json(ActionOrAck::Element(ElementMatchOutput { matched }))),
-        Response::ActionResult { verified, evidence, strategy_used, waited_ms, screenshot } => {
-            let screenshot = screenshot.map(|s| {
-                let s = *s;
-                ScreenshotOutput {
-                    mime: s.mime,
-                    width: s.width,
-                    height: s.height,
-                    data_b64: base64::engine::general_purpose::STANDARD.encode(s.bytes.into_inner()),
-                }
-            });
-            Ok(Json(ActionOrAck::Result(ActionResultOutput {
-                ok: verified,
-                verified,
-                evidence: evidence_str(evidence).to_string(),
-                strategy_used: strategy_str(strategy_used).to_string(),
-                waited_ms,
-                screenshot,
-            })))
+        // screenshot_after now returns a Screenshot response (v2 transition).
+        Response::Screenshot { bytes, mime, width, height } => {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
+            Ok(Json(ActionOrAck::Screenshot(ScreenshotOutput { mime, width, height, data_b64 })))
         }
         Response::Error(e) => Err(Fastuse::err_from_proto(e)),
         other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
@@ -1097,14 +967,6 @@ fn screenshot_response(res: Response) -> Result<Json<ScreenshotOutput>, McpError
             let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
             Ok(Json(ScreenshotOutput { mime, width, height, data_b64 }))
         }
-        Response::Error(e) => Err(Fastuse::err_from_proto(e)),
-        other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
-    }
-}
-
-fn element_response(res: Response) -> Result<Json<ElementMatchOutput>, McpError> {
-    match res {
-        Response::Element { matched } => Ok(Json(ElementMatchOutput { matched })),
         Response::Error(e) => Err(Fastuse::err_from_proto(e)),
         other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
     }

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use fastuse_proto::{ActionOpts, ImageFormat, Redact, Request, Response, Selector, TreeView};
+use fastuse_proto::{ActionOpts, ImageFormat, Request, Response, Selector, TreeView};
 use serde_json::json;
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
@@ -186,51 +186,6 @@ pub async fn inspect_at_point(pipe_path: &str, x: i32, y: i32) -> anyhow::Result
         Response::Error(e) => print_err(e),
         other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
     }
-}
-
-pub async fn click_element(
-    pipe_path: &str,
-    selector_json: &str,
-    mods: Option<&str>,
-    opts: Option<ActionOpts>,
-) -> anyhow::Result<()> {
-    let selector = parse_selector(selector_json)?;
-    let modifiers = mods.map(|s| {
-        s.split(',')
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-    });
-    let req = Request::ClickElement { selector, modifiers, opts };
-    print_action_or_ack(one_call(pipe_path, req).await?)
-}
-
-pub async fn type_into_element(
-    pipe_path: &str,
-    selector_json: &str,
-    text: String,
-    opts: Option<ActionOpts>,
-) -> anyhow::Result<()> {
-    let selector = parse_selector(selector_json)?;
-    let req = Request::TypeIntoElement {
-        selector,
-        text: Redact::new(text),
-        opts,
-    };
-    print_action_or_ack(one_call(pipe_path, req).await?)
-}
-
-pub async fn wait_for_element(
-    pipe_path: &str,
-    selector_json: &str,
-    timeout_ms: u32,
-) -> anyhow::Result<()> {
-    let selector = parse_selector(selector_json)?;
-    let req = Request::WaitForElement {
-        selector,
-        timeout_ms,
-    };
-    print_match(one_call(pipe_path, req).await?)
 }
 
 pub async fn scroll_into_view(pipe_path: &str, selector_json: &str, opts: Option<ActionOpts>) -> anyhow::Result<()> {
