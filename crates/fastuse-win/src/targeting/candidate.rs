@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use fastuse_proto::coords::Rect;
+use fastuse_proto::redact::Redact;
 use fastuse_proto::uia_node::ControlType;
 use fastuse_proto::Selector;
 use serde::{Deserialize, Serialize};
@@ -63,8 +64,9 @@ pub enum TargetCandidate {
     },
     /// Resolved via OCR text match.
     Ocr {
-        /// Matched text.
-        text: String,
+        /// Matched text (redacted at boundary — user-screen content per
+        /// spec invariant).
+        text: Redact<String>,
         /// Bounding rect in physical pixels.
         bounds: Rect,
         /// Confidence score [0.0, 1.0].
@@ -296,6 +298,139 @@ fn map_uia_control_type(ct: uiautomation::types::ControlType) -> ControlType {
         U::CheckBox => ControlType::CheckBox,
         U::RadioButton => ControlType::RadioButton,
         _ => ControlType::Custom,
+    }
+}
+
+/// Fuse UIA candidates and OCR hits into one ranked list. Geometry candidates
+/// are passed through unchanged (caller-provided coords carry their own score).
+///
+/// Scoring shape:
+/// - UIA candidate base score: 0.95 (action-pattern available + enabled) →
+///   0.55 (no patterns, just bounds).
+/// - OCR hit base score: confidence * 0.85 (ceiling lower than UIA because
+///   OCR can match similar text in unrelated regions).
+/// - Geometry caller-provided: 1.0 (caller asserts).
+/// - Geometry from UIA-bounds-only: 0.55 (same as no-pattern UIA).
+///
+/// Tiebreaker on equal score: UIA > OCR > Geometry.
+pub fn fuse_candidates(
+    uia_candidates: Vec<TargetCandidate>,
+    ocr_hits: Vec<crate::ocr::OcrHit>,
+    geometry: Vec<TargetCandidate>,
+) -> Vec<TargetCandidate> {
+    let mut out: Vec<TargetCandidate> = Vec::new();
+    out.extend(uia_candidates);
+    out.extend(ocr_hits.into_iter().map(|h| TargetCandidate::Ocr {
+        text: h.text,
+        bounds: h.bounds,
+        score: (h.confidence * 0.85).clamp(0.0, 0.85),
+    }));
+    out.extend(geometry);
+
+    out.sort_by(|a, b| {
+        b.score()
+            .partial_cmp(&a.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| kind_rank(a).cmp(&kind_rank(b)))
+    });
+    out
+}
+
+fn kind_rank(c: &TargetCandidate) -> u8 {
+    match c {
+        TargetCandidate::Uia { .. } => 0,
+        TargetCandidate::Ocr { .. } => 1,
+        TargetCandidate::Geometry { .. } => 2,
+    }
+}
+
+/// Score a single UIA candidate based on its capabilities. Used by
+/// `resolve_candidates` when constructing `TargetCandidate::Uia` entries.
+pub fn score_uia(patterns: &PatternSet, is_enabled: bool, is_offscreen: bool) -> f32 {
+    let mut s: f32 = 0.55; // baseline: bounds-only
+    if patterns.invoke
+        || patterns.toggle
+        || patterns.selection_item
+        || patterns.expand_collapse
+        || patterns.value
+    {
+        s = 0.85;
+    }
+    if patterns.toggle || patterns.value {
+        // Sharp postcondition available (state read).
+        s = 0.95;
+    }
+    if !is_enabled {
+        s -= 0.15;
+    }
+    if is_offscreen {
+        s -= 0.10;
+    }
+    s.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod fuse_tests {
+    use super::*;
+    use crate::ocr::OcrHit;
+    use fastuse_proto::coords::Rect;
+    use fastuse_proto::uia_node::ControlType;
+
+    fn uia(score: f32) -> TargetCandidate {
+        TargetCandidate::Uia {
+            runtime_id: vec![1, 2, 3],
+            bounds: Rect { x: 0, y: 0, w: 10, h: 10 },
+            control_type: ControlType::Button,
+            patterns: PatternSet { invoke: true, ..Default::default() },
+            is_enabled: true,
+            is_offscreen: false,
+            score,
+        }
+    }
+
+    #[test]
+    fn higher_score_sorts_first() {
+        let fused = fuse_candidates(vec![uia(0.5), uia(0.9)], vec![], vec![]);
+        assert!((fused[0].score() - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uia_outranks_ocr_on_tie() {
+        let ocr = OcrHit {
+            text: Redact::new("OK".to_string()),
+            bounds: Rect { x: 0, y: 0, w: 10, h: 10 },
+            confidence: 1.0,
+        };
+        let fused = fuse_candidates(vec![uia(0.85)], vec![ocr], vec![]);
+        // UIA at 0.85 vs OCR at 0.85 — UIA should sort first by kind_rank.
+        assert!(matches!(fused[0], TargetCandidate::Uia { .. }));
+        // Sanity check: OCR fused score lands at 0.85.
+        assert!((fused[1].score() - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_uia_baseline_no_patterns() {
+        let s = score_uia(&PatternSet::default(), true, false);
+        assert!((s - 0.55).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_uia_invoke_only_is_high() {
+        let s = score_uia(&PatternSet { invoke: true, ..Default::default() }, true, false);
+        assert!((s - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_uia_toggle_is_max() {
+        let s = score_uia(&PatternSet { toggle: true, ..Default::default() }, true, false);
+        assert!((s - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_uia_disabled_penalized() {
+        let high = score_uia(&PatternSet { invoke: true, ..Default::default() }, true, false);
+        let low = score_uia(&PatternSet { invoke: true, ..Default::default() }, false, false);
+        assert!(low < high);
     }
 }
 

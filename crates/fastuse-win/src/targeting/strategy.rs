@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn ocr_candidate_picks_ocr_bounds() {
         let c = TargetCandidate::Ocr {
-            text: "Settings".into(),
+            text: fastuse_proto::redact::Redact::new("Settings".to_string()),
             bounds: Rect { x: 0, y: 0, w: 10, h: 10 },
             score: 0.9,
         };
