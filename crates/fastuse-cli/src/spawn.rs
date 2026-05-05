@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::time::sleep;
-use windows::core::PWSTR;
-use windows::Win32::System::Threading::{
-    CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
-    PROCESS_INFORMATION, STARTUPINFOW,
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_CANCELLED};
+use windows::Win32::UI::Shell::{
+    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
 };
+use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 /// Try to connect to `pipe_path`. If the pipe doesn't exist, spawn
 /// `fastuse-daemon.exe` (located beside the current binary or via PATH) and
@@ -126,43 +127,53 @@ fn locate_daemon() -> std::io::Result<PathBuf> {
     Ok(PathBuf::from("fastuse-daemon.exe"))
 }
 
+/// Spawn the daemon at High integrity level via UAC ("runas" verb).
+///
+/// We always elevate the daemon so it can drive admin-process windows
+/// (e.g. L-Connect3). Without elevation, SendInput targeting an elevated
+/// HWND is silently dropped by UIPI.
+///
+/// On UAC decline (`ERROR_CANCELLED`) we surface a clear stderr message
+/// and return Err — the existing `connect_or_spawn` retry/evict path then
+/// reports the typed `DaemonSpawnFailed` error.
 fn spawn_daemon_detached() -> std::io::Result<()> {
     let path = locate_daemon()?;
-    let cmdline = format!("\"{}\"", path.display());
-    let mut cmd_w: Vec<u16> = OsStr::new(&cmdline)
+
+    // Wide-null-terminated buffers held alive across the FFI call.
+    let file_w: Vec<u16> = OsStr::new(path.as_os_str())
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
 
-    let mut si = STARTUPINFOW::default();
-    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut pi = PROCESS_INFORMATION::default();
-
-    let creation_flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    // SAFETY: cmd_w is a wide-null-terminated mutable buffer; CreateProcessW
-    // writes the parsed command line back into it during invocation.
-    let res = unsafe {
-        CreateProcessW(
-            None,
-            Some(PWSTR(cmd_w.as_mut_ptr())),
-            None,
-            None,
-            false,
-            creation_flags,
-            None,
-            None,
-            &si,
-            &mut pi,
-        )
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
+        lpVerb: PCWSTR(verb_w.as_ptr()),
+        lpFile: PCWSTR(file_w.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
     };
+
+    // SAFETY: `info` is fully initialised; verb_w/file_w live to end of fn.
+    let res = unsafe { ShellExecuteExW(&mut info) };
     if res.is_err() {
+        // GetLastError tells us if the user clicked No on UAC.
+        let last = unsafe { GetLastError() };
+        if last == ERROR_CANCELLED {
+            eprintln!(
+                "fastuse: daemon requires administrator rights — re-run and accept the UAC prompt"
+            );
+        }
         return Err(std::io::Error::last_os_error());
     }
-    // Close handles immediately — we don't supervise the child.
-    // SAFETY: hProcess and hThread are returned by CreateProcessW.
-    unsafe {
-        let _ = windows::Win32::Foundation::CloseHandle(pi.hProcess);
-        let _ = windows::Win32::Foundation::CloseHandle(pi.hThread);
+
+    // Close the child handle — we don't supervise it.
+    if !info.hProcess.is_invalid() {
+        // SAFETY: hProcess returned by ShellExecuteExW with SEE_MASK_NOCLOSEPROCESS.
+        unsafe {
+            let _ = CloseHandle(info.hProcess);
+        }
     }
     Ok(())
 }
