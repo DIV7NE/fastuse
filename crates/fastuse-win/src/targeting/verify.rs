@@ -10,9 +10,50 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastuse_proto::wire::VerificationEvidence;
-use uiautomation::UIAutomation;
+use uiautomation::patterns::{UIPatternType, UISelectionItemPattern, UITogglePattern, UIValuePattern};
+use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::variants::{Value, Variant};
+use uiautomation::{UIAutomation, UIElement};
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use crate::uia_pool::UiaPoolHandle;
+
+/// Resolve a live `UIElement` by RuntimeId from the UIA root, prefetching
+/// the requested pattern + RuntimeId property in one `BuildUpdatedCache`
+/// pass (UIA-12 / `check_cacherequest`). Returns `None` when the element
+/// is no longer in the tree (e.g. dialog closed mid-poll).
+fn element_from_runtime_id(
+    automation: &UIAutomation,
+    runtime_id: &[i32],
+    pattern: Option<UIPatternType>,
+) -> Option<UIElement> {
+    // Build a Variant wrapping the RuntimeId i32 array (VT_ARRAY|VT_I4).
+    let rid_variant: Variant = Value::ArrayI4(runtime_id.to_vec()).into();
+    let condition = automation
+        .create_property_condition(UIProperty::RuntimeId, rid_variant, None)
+        .ok()?;
+    let req = automation.create_cache_request().ok()?;
+    // Always cache RuntimeId so we can re-confirm identity from the cache.
+    req.add_property(UIProperty::RuntimeId).ok()?;
+    if let Some(p) = pattern {
+        match p {
+            UIPatternType::Value => {
+                req.add_property(UIProperty::ValueValue).ok()?;
+            }
+            UIPatternType::Toggle => {
+                req.add_property(UIProperty::ToggleToggleState).ok()?;
+            }
+            UIPatternType::SelectionItem => {
+                req.add_property(UIProperty::SelectionItemIsSelected).ok()?;
+            }
+            _ => {}
+        }
+        req.add_pattern(p).ok()?;
+    }
+    let root = automation.get_root_element().ok()?;
+    root.find_first_build_cache(TreeScope::Subtree, &condition, &req)
+        .ok()
+}
 
 /// Outcome of a verification poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,14 +123,40 @@ pub fn snapshot_subtree(
 }
 
 fn snapshot_on_uia_thread(
-    _automation: &UIAutomation,
-    _parent_runtime_id: &[i32],
+    automation: &UIAutomation,
+    parent_runtime_id: &[i32],
 ) -> Option<SubtreeSnapshot> {
-    // Implementer: walk the parent element's children with the existing
-    // CacheRequest-equipped walker, collect RuntimeId per child, sort
-    // for stable comparison. Read GetForegroundWindow + GetFocusedElement
-    // for the auxiliary signals.
-    None
+    // Locate the parent. If it's gone, the subtree we'd compare against
+    // is gone too — bail with None so callers fall back to Unverified.
+    let parent = element_from_runtime_id(automation, parent_runtime_id, None)?;
+
+    // Children: enumerate via FindAll(TreeScope::Children, true_cond) and
+    // read each child's RuntimeId. RuntimeId is a method, not a Current*
+    // accessor, so it satisfies UIA-12.
+    let true_cond = automation.create_true_condition().ok()?;
+    let mut child_runtime_ids: Vec<Vec<i32>> = parent
+        .find_all(TreeScope::Children, &true_cond)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| c.get_runtime_id().ok())
+        .collect();
+    // Sort each id (already sorted as a sequence; sort the outer Vec for
+    // stable set comparison in `subtree_mutated`).
+    child_runtime_ids.sort();
+
+    // SAFETY: GetForegroundWindow is safe to call from any thread.
+    let foreground_hwnd = unsafe { GetForegroundWindow() }.0 as u64;
+
+    let focused_runtime_id = automation
+        .get_focused_element()
+        .ok()
+        .and_then(|el| el.get_runtime_id().ok());
+
+    Some(SubtreeSnapshot {
+        child_runtime_ids,
+        foreground_hwnd,
+        focused_runtime_id,
+    })
 }
 
 /// Compare a fresh snapshot against the pre-action snapshot. Subtree
@@ -140,11 +207,11 @@ pub async fn poll_toggle_state(
     .await
 }
 
-fn read_toggle_state(_automation: &UIAutomation, _runtime_id: &[i32]) -> Option<i32> {
-    // Implementer: use the walker's element-from-runtimeid helper (or add
-    // one if missing) to fetch the live element, then call
-    // TogglePattern::get_current_state(). Map ToggleState to i32.
-    None
+fn read_toggle_state(automation: &UIAutomation, runtime_id: &[i32]) -> Option<i32> {
+    let el = element_from_runtime_id(automation, runtime_id, Some(UIPatternType::Toggle))?;
+    let pat = el.get_cached_pattern::<UITogglePattern>().ok()?;
+    let state = pat.get_cached_toggle_state().ok()?;
+    Some(state as i32)
 }
 
 /// Selection postcondition: poll `IsSelected == true`.
@@ -165,9 +232,10 @@ pub async fn poll_is_selected(
     .await
 }
 
-fn read_is_selected(_automation: &UIAutomation, _runtime_id: &[i32]) -> Option<bool> {
-    // Implementer: SelectionItemPattern::get_current_is_selected().
-    None
+fn read_is_selected(automation: &UIAutomation, runtime_id: &[i32]) -> Option<bool> {
+    let el = element_from_runtime_id(automation, runtime_id, Some(UIPatternType::SelectionItem))?;
+    let pat = el.get_cached_pattern::<UISelectionItemPattern>().ok()?;
+    pat.is_cached_selected().ok()
 }
 
 /// Value postcondition: poll until the live value contains the typed text
@@ -212,9 +280,10 @@ pub async fn poll_value_contains(
     outcome
 }
 
-fn read_value(_automation: &UIAutomation, _runtime_id: &[i32]) -> Option<String> {
-    // Implementer: ValuePattern::get_current_value() -> BSTR -> String.
-    None
+fn read_value(automation: &UIAutomation, runtime_id: &[i32]) -> Option<String> {
+    let el = element_from_runtime_id(automation, runtime_id, Some(UIPatternType::Value))?;
+    let pat = el.get_cached_pattern::<UIValuePattern>().ok()?;
+    pat.get_cached_value().ok()
 }
 
 #[cfg(test)]
