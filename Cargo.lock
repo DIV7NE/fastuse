@@ -411,6 +411,8 @@ dependencies = [
  "fastuse-proto",
  "serde",
  "thiserror 1.0.69",
+ "toml",
+ "tracing",
  "windows",
 ]
 
