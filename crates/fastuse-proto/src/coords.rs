@@ -7,6 +7,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A 2-D point in physical pixels, virtual-desktop space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Point {
+    /// X coordinate in physical pixels (virtual-desktop origin).
+    pub x: i32,
+    /// Y coordinate in physical pixels (virtual-desktop origin).
+    pub y: i32,
+}
+
 /// Axis-aligned rectangle in physical pixels, virtual-desktop space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
