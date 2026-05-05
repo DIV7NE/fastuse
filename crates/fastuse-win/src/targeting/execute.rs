@@ -217,9 +217,10 @@ async fn run_strategy<'a>(
 }
 
 fn resolve_foreground(_uia: &Arc<UiaPoolHandle>) -> Option<u64> {
-    // Implementer: GetForegroundWindow() — already exposed in fastuse_win
-    // window module. Cast to u64.
-    None
+    // GetForegroundWindow() is thread-safe Win32 — no UIA pool dispatch
+    // required. Reuses the same helper that powers Request::ForegroundWindow
+    // (via uia/automation.rs) so behavior matches the existing arm.
+    crate::uia::automation::foreground_hwnd()
 }
 
 #[cfg(test)]
