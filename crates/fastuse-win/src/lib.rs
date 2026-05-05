@@ -24,6 +24,7 @@ pub mod dpi;
 pub mod input;
 pub mod input_thread;
 pub mod launch;
+pub mod ocr;
 pub mod ocr_thread;
 pub mod process;
 pub mod shell;
