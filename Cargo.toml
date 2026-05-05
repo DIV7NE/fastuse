@@ -7,6 +7,7 @@ members = [
     "crates/fastuse-daemon",
     "crates/fastuse-mcp",
     "crates/fastuse-cli",
+    "crates/fastuse-eval",
     "xtask",
 ]
 

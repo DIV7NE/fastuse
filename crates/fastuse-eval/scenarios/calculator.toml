@@ -1,0 +1,18 @@
+name = "calculator-arithmetic"
+tier = 1
+task = """
+Open the Windows Calculator if it's not already open. Then click the buttons
+to compute 9 + 10 and press equals. Verify the result shows 19.
+"""
+timeout_seconds = 60
+
+[launch]
+command = "calc.exe"
+args = []
+wait_for_window_title_substr = "Calculator"
+wait_timeout_ms = 5000
+
+[success]
+kind = "UiaValueEquals"
+selector = '{"ByAutomationId": "CalculatorResults"}'
+expected = "Display is 19"
