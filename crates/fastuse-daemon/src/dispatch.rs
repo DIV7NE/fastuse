@@ -400,6 +400,16 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             };
             finalize(inner, opts, ctx)
         }
+
+        // --- v2 computer action dispatch (wired in Task 10) ---
+        Request::Computer(_) => Response::Error(Error::new(
+            ErrorCode::Internal,
+            "dispatch wired in Task 10".to_string(),
+        )),
+        Request::WaitForWindowV2(_) => Response::Error(Error::new(
+            ErrorCode::Internal,
+            "dispatch wired in Task 10".to_string(),
+        )),
     };
 
     DispatchResult {
