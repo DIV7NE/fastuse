@@ -1014,6 +1014,12 @@ pub struct ScaleInfo {
 pub struct ComputerRequest {
     /// The action to dispatch.
     pub action: ComputerAction,
+    /// When `true`, coordinates in `action` are native virtual-desktop pixels;
+    /// the daemon skips `ScaleStack` translation entirely. CLI sets this to
+    /// `true`; MCP leaves it `false` (default) so scale-translate runs as
+    /// normal.
+    #[serde(default)]
+    pub coordinates_native: bool,
 }
 
 /// Filter for the v2 `list_windows` MCP tool.

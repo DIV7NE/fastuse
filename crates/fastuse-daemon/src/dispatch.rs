@@ -560,6 +560,8 @@ async fn dispatch_computer(
     };
     use fastuse_win::input::sendinput::Modifiers;
 
+    let coordinates_native = req.coordinates_native;
+
     let ok_response = || Response::Computer(ComputerResult {
         ok: true,
         image: None,
@@ -602,7 +604,7 @@ async fn dispatch_computer(
         // ------------------------------------------------------------------
         ComputerAction::LeftClick { coordinate, text, humanize } => {
             let modifiers = parse_chord_modifiers(text.as_ref().map(|r| r.as_inner().as_str()));
-            match translate_or_err(&ctx.scale, coordinate) {
+            match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => r,
                 Ok(at) => dispatch_input(
                     ctx,
@@ -619,7 +621,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::RightClick { coordinate, humanize } => {
-            match translate_or_err(&ctx.scale, coordinate) {
+            match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => r,
                 Ok(at) => dispatch_input(
                     ctx,
@@ -636,7 +638,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::MiddleClick { coordinate, humanize } => {
-            match translate_or_err(&ctx.scale, coordinate) {
+            match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => r,
                 Ok(at) => dispatch_input(
                     ctx,
@@ -653,7 +655,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::DoubleClick { coordinate, humanize } => {
-            match translate_or_err(&ctx.scale, coordinate) {
+            match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => r,
                 Ok(at) => dispatch_input(
                     ctx,
@@ -670,7 +672,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::TripleClick { coordinate, humanize } => {
-            match translate_or_err(&ctx.scale, coordinate) {
+            match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => r,
                 Ok(at) => dispatch_input(
                     ctx,
@@ -688,11 +690,11 @@ async fn dispatch_computer(
         // ------------------------------------------------------------------
         ComputerAction::LeftClickDrag { start_coordinate, coordinate, humanize, text } => {
             let modifiers = parse_chord_modifiers(text.as_ref().map(|r| r.as_inner().as_str()));
-            let from = match translate_or_err(&ctx.scale, start_coordinate) {
+            let from = match resolve_coord(&ctx.scale, start_coordinate, coordinates_native) {
                 Err(r) => return r,
                 Ok(p) => p,
             };
-            let to = match translate_or_err(&ctx.scale, coordinate) {
+            let to = match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => return r,
                 Ok(p) => p,
             };
@@ -711,7 +713,7 @@ async fn dispatch_computer(
         // ------------------------------------------------------------------
         ComputerAction::LeftMouseDown { coordinate } => {
             let at = match coordinate {
-                Some(c) => match translate_or_err(&ctx.scale, c) {
+                Some(c) => match resolve_coord(&ctx.scale, c, coordinates_native) {
                     Err(r) => return r,
                     Ok(p) => p,
                 },
@@ -728,7 +730,7 @@ async fn dispatch_computer(
         // ------------------------------------------------------------------
         ComputerAction::LeftMouseUp { coordinate } => {
             let at = match coordinate {
-                Some(c) => match translate_or_err(&ctx.scale, c) {
+                Some(c) => match resolve_coord(&ctx.scale, c, coordinates_native) {
                     Err(r) => return r,
                     Ok(p) => p,
                 },
@@ -744,7 +746,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::MouseMove { coordinate, humanize } => {
-            let to = match translate_or_err(&ctx.scale, coordinate) {
+            let to = match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => return r,
                 Ok(p) => p,
             };
@@ -812,7 +814,7 @@ async fn dispatch_computer(
 
         // ------------------------------------------------------------------
         ComputerAction::Scroll { coordinate, scroll_direction, scroll_amount } => {
-            let at = match translate_or_err(&ctx.scale, coordinate) {
+            let at = match resolve_coord(&ctx.scale, coordinate, coordinates_native) {
                 Err(r) => return r,
                 Ok(p) => p,
             };
@@ -873,6 +875,24 @@ async fn dispatch_computer(
                 }
             }
         }
+    }
+}
+
+/// Resolve a coordinate to a native virtual-desktop `Point`.
+///
+/// When `native` is `true` the coordinate is already in native pixels and the
+/// `ScaleStack` is bypassed entirely (CLI path, `coordinates_native: true`).
+/// When `native` is `false` the coordinate is in scaled image-pixel space and
+/// is translated through the current `ScaleStack` snapshot (MCP path).
+fn resolve_coord(
+    scale: &Arc<Mutex<ScaleStack>>,
+    coordinate: [i32; 2],
+    native: bool,
+) -> Result<fastuse_win::input::backend::Point, Response> {
+    if native {
+        Ok(fastuse_win::input::backend::Point { x: coordinate[0], y: coordinate[1] })
+    } else {
+        translate_or_err(scale, coordinate)
     }
 }
 
