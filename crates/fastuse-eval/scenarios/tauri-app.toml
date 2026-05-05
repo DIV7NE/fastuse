@@ -1,0 +1,19 @@
+name = "compiled-app-test"
+tier = 2
+task = """
+A user-built compiled application is at $env:FASTUSE_TEST_APP_PATH (set this
+env variable before running). Launch the app, wait for its main window, then
+exercise the primary feature (clicking the most prominent button or filling
+the most prominent input).
+"""
+timeout_seconds = 90
+
+[launch]
+command = "${FASTUSE_TEST_APP_PATH}"
+args = []
+wait_for_window_title_substr = "${FASTUSE_TEST_APP_TITLE}"
+wait_timeout_ms = 8000
+
+[success]
+kind = "ScreenshotContainsText"
+needle = "${FASTUSE_TEST_APP_SUCCESS_NEEDLE}"
