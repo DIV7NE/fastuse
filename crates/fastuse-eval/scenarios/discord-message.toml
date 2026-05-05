@@ -1,0 +1,19 @@
+name = "discord-send-self-dm"
+tier = 1
+task = """
+Discord is already running and logged in (user prerequisite). Focus the
+Discord window. Open the Discord quick switcher with Ctrl+K. Search for the
+"#fastuse-eval-channel" text channel (user prerequisite — must exist).
+Send the message "fastuse v2 eval ping" in that channel.
+"""
+timeout_seconds = 90
+
+[launch]
+command = "discord-prereq"  # fake — user must have Discord running
+args = []
+wait_for_window_title_substr = "Discord"
+wait_timeout_ms = 5000
+
+[success]
+kind = "ScreenshotContainsText"
+needle = "fastuse v2 eval ping"
