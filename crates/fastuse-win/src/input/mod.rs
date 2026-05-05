@@ -5,10 +5,13 @@
 //! from `input_thread.rs` (Phase 1 D-26). Tokio workers MUST NOT call into
 //! these helpers directly.
 
+pub mod backend;
 pub mod cursor;
 pub mod handlers;
+pub mod humanize;
 pub mod modifier_guard;
 pub mod sendinput;
+pub mod sendinput_backend;
 pub mod uipi;
 
 pub use sendinput::{InputErr, MockSink};
