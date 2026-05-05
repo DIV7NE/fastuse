@@ -24,7 +24,7 @@ pub mod uia_node;
 pub mod wire;
 
 pub use chord::{parse_chord, Chord, ChordError, ChordKey, ModKey};
-pub use coords::{MonitorInfo, MouseButton, Rect, ScrollDirection, WindowInfo};
+pub use coords::{MonitorInfo, MouseButton, Point, Rect, ScrollDirection, WindowInfo};
 pub use error::{Error, ErrorCode};
 pub use redact::{Redact, RedactLen};
 pub use selector::Selector;
