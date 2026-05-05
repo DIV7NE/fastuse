@@ -1,5 +1,6 @@
 //! Phase 2 window/monitor module — list_monitors, cursor_position,
-//! foreground_window, list_windows, focus_window, resize_move_window.
+//! foreground_window, list_windows, focus_window, resize_move_window,
+//! wait_for_window.
 
 pub mod cursor_position;
 pub mod focus;
@@ -7,6 +8,7 @@ pub mod foreground;
 pub mod list_windows;
 pub mod monitors;
 pub mod move_resize;
+pub mod wait_for_window;
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, MAX_PATH, RECT};
