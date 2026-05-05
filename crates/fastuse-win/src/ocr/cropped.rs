@@ -44,6 +44,15 @@ pub async fn ocr_cropped_progressive(
     capture: Arc<CaptureThreadHandle>,
     ocr: Arc<OcrThreadHandle>,
 ) -> Vec<OcrHit> {
+    tracing::info!(
+        target: "fastuse_win::ocr::cropped",
+        region_x = region.x,
+        region_y = region.y,
+        region_w = region.w,
+        region_h = region.h,
+        needle = needle,
+        "ocr_cropped_progressive: entry"
+    );
     // Capture pixels for the region. Reuses the existing
     // capture_thread::run_screenshot_region API.
     let captured = match capture
@@ -52,9 +61,22 @@ pub async fn ocr_cropped_progressive(
         .flatten()
     {
         Some(p) => p,
-        None => return Vec::new(),
+        None => {
+            tracing::info!(
+                target: "fastuse_win::ocr::cropped",
+                "ocr_cropped_progressive: capture returned None"
+            );
+            return Vec::new();
+        }
     };
     let (pixels, captured_w, captured_h) = captured;
+    tracing::info!(
+        target: "fastuse_win::ocr::cropped",
+        pixel_buf_len = pixels.len(),
+        captured_w,
+        captured_h,
+        "ocr_cropped_progressive: capture done"
+    );
 
     let frame_hash = super::cache::frame_hash(&pixels);
     let key = super::cache::OcrCacheKey {
@@ -62,7 +84,14 @@ pub async fn ocr_cropped_progressive(
         region: super::cache::PackedRect::from(region),
     };
     let mut hits = match super::cache::cache_lookup(key) {
-        Some(h) => h,
+        Some(h) => {
+            tracing::info!(
+                target: "fastuse_win::ocr::cropped",
+                cached_count = h.len(),
+                "ocr_cropped_progressive: cache hit"
+            );
+            h
+        }
         None => {
             // OCR pass on the dedicated thread.
             let pixels_w = captured_w;
@@ -72,6 +101,22 @@ pub async fn ocr_cropped_progressive(
                 .run(move || run_ocr_on_pixels(&pixels_owned, pixels_w, pixels_h))
                 .ok()
                 .unwrap_or_default();
+            tracing::info!(
+                target: "fastuse_win::ocr::cropped",
+                raw_hit_count = raw_hits.len(),
+                "ocr_cropped_progressive: raw hits returned"
+            );
+            for h in &raw_hits {
+                tracing::info!(
+                    target: "fastuse_win::ocr::cropped",
+                    text = %h.text.as_inner(),
+                    bx = h.bounds.x,
+                    by = h.bounds.y,
+                    bw = h.bounds.w,
+                    bh = h.bounds.h,
+                    "ocr hit PRE-translate"
+                );
+            }
             // Translate hit bounds from region-local to virtual-desktop.
             let hits: Vec<OcrHit> = raw_hits
                 .into_iter()
@@ -85,6 +130,17 @@ pub async fn ocr_cropped_progressive(
                     h
                 })
                 .collect();
+            for h in &hits {
+                tracing::info!(
+                    target: "fastuse_win::ocr::cropped",
+                    text = %h.text.as_inner(),
+                    bx = h.bounds.x,
+                    by = h.bounds.y,
+                    bw = h.bounds.w,
+                    bh = h.bounds.h,
+                    "ocr hit POST-translate"
+                );
+            }
             super::cache::cache_store(key, hits.clone());
             hits
         }
@@ -94,7 +150,26 @@ pub async fn ocr_cropped_progressive(
     // Unwrap of Redact is local to this module (trusted boundary); the result
     // continues to flow through `Redact<String>` downstream.
     let needle_lower = needle.to_lowercase();
+    let pre_filter = hits.len();
     hits.retain(|h| h.text.as_inner().to_lowercase().contains(&needle_lower));
+    tracing::info!(
+        target: "fastuse_win::ocr::cropped",
+        needle = %needle_lower,
+        pre_filter_count = pre_filter,
+        post_filter_count = hits.len(),
+        "ocr_cropped_progressive: filter applied"
+    );
+    for h in &hits {
+        tracing::info!(
+            target: "fastuse_win::ocr::cropped",
+            text = %h.text.as_inner(),
+            bx = h.bounds.x,
+            by = h.bounds.y,
+            bw = h.bounds.w,
+            bh = h.bounds.h,
+            "ocr_cropped_progressive: returning hit"
+        );
+    }
     hits
 }
 
@@ -130,6 +205,13 @@ fn capture_region_pixels(region: Rect) -> Option<(Vec<u8>, i32, i32)> {
 /// `OcrEngine`. Empty `Vec` on any failure (no language pack, empty input,
 /// engine error) — OCR is best-effort by design.
 fn run_ocr_on_pixels(pixels: &[u8], w: i32, h: i32) -> Vec<OcrHit> {
+    tracing::info!(
+        target: "fastuse_win::ocr::cropped",
+        bitmap_w = w,
+        bitmap_h = h,
+        pixel_buf_len = pixels.len(),
+        "run_ocr_on_pixels: entry"
+    );
     if w <= 0 || h <= 0 || pixels.is_empty() {
         return Vec::new();
     }
@@ -239,12 +321,26 @@ fn run_ocr_on_pixels(pixels: &[u8], w: i32, h: i32) -> Vec<OcrHit> {
             continue;
         }
 
+        tracing::info!(
+            target: "fastuse_win::ocr::cropped",
+            text = %text,
+            bx = bounds.x,
+            by = bounds.y,
+            bw = bounds.w,
+            bh = bounds.h,
+            "run_ocr_on_pixels: emitting line"
+        );
         hits.push(OcrHit {
             text: Redact::new(text),
             bounds,
             confidence: 0.85,
         });
     }
+    tracing::info!(
+        target: "fastuse_win::ocr::cropped",
+        line_count = hits.len(),
+        "run_ocr_on_pixels: done"
+    );
     hits
 }
 
