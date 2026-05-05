@@ -90,6 +90,26 @@ pub async fn execute_targeted<'a>(req: TargetedRequest<'a>) -> Response {
         }
     };
 
+    // UIPI integrity gate. If the target's process runs at higher integrity
+    // than the daemon, every SendInput will be silently dropped by Windows
+    // UIPI. Fail fast with PermissionRequired instead of cycling through the
+    // strategy ladder and returning verified:false with no actionable signal.
+    if matches!(
+        profile.window.integrity_level,
+        crate::targeting::profile::IntegrityLevel::High
+    ) && !is_daemon_elevated()
+    {
+        return Response::Error(
+            Error::new(
+                ErrorCode::PermissionRequired,
+                "target window runs at higher integrity level than daemon",
+            )
+            .with_hint(
+                "relaunch fastuse-daemon as administrator (right-click → Run as administrator)",
+            ),
+        );
+    }
+
     let candidate = match profile.candidates.into_iter().next() {
         Some(c) => c,
         None => {
@@ -958,6 +978,59 @@ fn foreground_window_rect() -> Option<(i32, i32, u32, u32)> {
         let h = (r.bottom - r.top).max(0) as u32;
         Some((r.left, r.top, w, h))
     }
+}
+
+/// Read the current process integrity level. Returns true iff the daemon is
+/// running at High integrity (elevated / admin). Used by the UIPI gate to
+/// decide whether to fail fast against a High-IL target.
+fn is_daemon_elevated() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // SAFETY: GetCurrentProcess returns a pseudo-handle; OpenProcessToken on it
+    // with TOKEN_QUERY is the documented self-IL probe.
+    let proc_h = unsafe { GetCurrentProcess() };
+    let mut tok = HANDLE::default();
+    let ok = unsafe { OpenProcessToken(proc_h, TOKEN_QUERY, &mut tok) };
+    if ok.is_err() {
+        return false;
+    }
+    let mut size = 0u32;
+    let _ = unsafe { GetTokenInformation(tok, TokenIntegrityLevel, None, 0, &mut size) };
+    if size == 0 {
+        let _ = unsafe { CloseHandle(tok) };
+        return false;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let res = unsafe {
+        GetTokenInformation(
+            tok,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as _),
+            size,
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(tok) };
+    if res.is_err() {
+        return false;
+    }
+    let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let sid = label.Label.Sid;
+    if sid.0.is_null() {
+        return false;
+    }
+    let count = unsafe { *GetSidSubAuthorityCount(sid) };
+    if count == 0 {
+        return false;
+    }
+    let last = unsafe { *GetSidSubAuthority(sid, (count - 1) as u32) };
+    // 0x3000 = SECURITY_MANDATORY_HIGH_RID. High or System counts as elevated.
+    last >= 0x3000
 }
 
 fn resolve_foreground(_uia: &Arc<UiaPoolHandle>) -> Option<u64> {
