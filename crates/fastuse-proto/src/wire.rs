@@ -333,6 +333,12 @@ pub enum Request {
     /// Warm every cold path: D3D11 device, DXGI duplication, UIA root,
     /// foreground HWND cache, monitor enum, COM apartments. No side effects.
     Warmup,
+
+    // --- v2: computer action dispatch (Task 9) ---
+    /// Dispatch a `computer` action (Anthropic computer_20251124 schema).
+    Computer(ComputerRequest),
+    /// Wait for a window matching title/process to appear (v2 shape).
+    WaitForWindowV2(WaitForWindowRequest),
 }
 
 /// Clipboard format selector.
@@ -715,6 +721,10 @@ pub enum Response {
         /// Total wall-clock (microseconds).
         total_us: u64,
     },
+
+    // --- v2: computer action result (Task 9) ---
+    /// Result of a `Computer` action dispatch.
+    Computer(ComputerResult),
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in
@@ -785,6 +795,387 @@ pub enum FrameError {
     /// Frame payload exceeds [`MAX_FRAME_BYTES`].
     #[error("frame too large: {0} bytes (cap is {})", MAX_FRAME_BYTES)]
     TooLarge(usize),
+}
+
+// ---------------------------------------------------------------------------
+// v2 — computer action enum (Task 9)
+// Mirrors Anthropic computer_20251124. Coordinates are in scaled image-pixel
+// space (Section 4 of the spec).
+// ---------------------------------------------------------------------------
+
+/// Anthropic `computer_20251124` action enum. Coordinates are in scaled
+/// image-pixel space (per the per-session `ScaleStack` in `fastuse-win`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ComputerAction {
+    /// Capture a screenshot.
+    Screenshot {
+        /// Optional monitor index; defaults to the foreground monitor.
+        #[serde(default)]
+        monitor: Option<u32>,
+    },
+    /// Single primary-button click at `coordinate`.
+    LeftClick {
+        /// Click position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// Modifier chord like `"ctrl+shift"`.
+        #[serde(default)]
+        text: Option<String>,
+        /// When true, apply Bezier-curve motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Single secondary-button click at `coordinate`.
+    RightClick {
+        /// Click position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Single middle-button click at `coordinate`.
+    MiddleClick {
+        /// Click position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Two primary-button clicks at `coordinate`.
+    DoubleClick {
+        /// Click position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Three primary-button clicks at `coordinate`.
+    TripleClick {
+        /// Click position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Press primary button, drag from `start_coordinate` to `coordinate`,
+    /// release. Atomic — covers ~95% of drag use cases.
+    LeftClickDrag {
+        /// Drag start in scaled image-pixel space.
+        start_coordinate: [i32; 2],
+        /// Drag end in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized motion + timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+        /// Modifier chord held during drag (e.g. `"ctrl"` for copy-drag).
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Press primary button without releasing. Composable for modifier drags.
+    LeftMouseDown {
+        /// Position to press at; defaults to current cursor when absent.
+        #[serde(default)]
+        coordinate: Option<[i32; 2]>,
+    },
+    /// Release primary button. Composable for modifier drags.
+    LeftMouseUp {
+        /// Position to release at; defaults to current cursor when absent.
+        #[serde(default)]
+        coordinate: Option<[i32; 2]>,
+    },
+    /// Move the cursor without clicking.
+    MouseMove {
+        /// Target position in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// When true, apply humanized Bezier motion.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Read the current cursor position. Returned in `ComputerResult.cursor`.
+    CursorPosition,
+    /// Type a string of literal Unicode text.
+    Type {
+        /// Text to type.
+        text: String,
+        /// When true, apply per-keystroke timing jitter.
+        #[serde(default = "yes")]
+        humanize: bool,
+    },
+    /// Press a chord like `"ctrl+l"`, `"enter"`, `"alt+f4"`.
+    Key {
+        /// Chord syntax (xdotool-style).
+        text: String,
+    },
+    /// Press a chord and hold it for `duration` milliseconds before release.
+    HoldKey {
+        /// Chord syntax (xdotool-style).
+        text: String,
+        /// Hold duration in milliseconds.
+        duration: u32,
+    },
+    /// Mouse-wheel scroll at `coordinate`.
+    Scroll {
+        /// Scroll origin in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// Direction (up / down / left / right).
+        scroll_direction: ScrollDir,
+        /// Number of wheel ticks.
+        scroll_amount: i32,
+    },
+    /// Sleep for `duration` milliseconds. Useful inside multi-step flows.
+    Wait {
+        /// Sleep duration in milliseconds.
+        duration: u32,
+    },
+    /// Crop a region around `coordinate` and upscale to standard target
+    /// dimensions. Pushes a new `ScaleSnapshot` onto the daemon's
+    /// `ScaleStack`; subsequent click coords are interpreted in the zoomed
+    /// frame until the next `Screenshot` resets the stack.
+    Zoom {
+        /// Center of the zoom region in scaled image-pixel space.
+        coordinate: [i32; 2],
+        /// Multiplicative zoom factor (e.g. 2.5 = 2.5× zoom).
+        zoom_factor: f32,
+    },
+}
+
+fn yes() -> bool { true }
+
+/// Scroll wheel direction for `ComputerAction::Scroll`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollDir {
+    /// Scroll up (away from user).
+    Up,
+    /// Scroll down (toward user).
+    Down,
+    /// Scroll left.
+    Left,
+    /// Scroll right.
+    Right,
+}
+
+/// Result of a `computer` action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComputerResult {
+    /// True if the daemon successfully dispatched. False = error.
+    pub ok: bool,
+    /// Set for `Screenshot` / `Zoom` actions.
+    #[serde(default)]
+    pub image: Option<ImagePayload>,
+    /// Set for `CursorPosition`.
+    #[serde(default)]
+    pub cursor: Option<[i32; 2]>,
+    /// Scale snapshot the image was captured under (for `Screenshot` / `Zoom`).
+    #[serde(default)]
+    pub scale: Option<ScaleInfo>,
+}
+
+/// Encoded image returned by `Screenshot` / `Zoom`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImagePayload {
+    /// `"jpeg"` or `"png"`.
+    pub format: String,
+    /// Image width in pixels (matches `ScaleInfo.scaled_w`).
+    pub width: u32,
+    /// Image height in pixels (matches `ScaleInfo.scaled_h`).
+    pub height: u32,
+    /// Base64 of the encoded image bytes (no `data:` prefix). The MCP layer
+    /// wraps as `ImageContent`; CLI may emit to file when `--out` provided.
+    pub data_base64: String,
+}
+
+/// Snapshot of one screenshot's scaling state. Mirrors the daemon's
+/// `fastuse_win::scaling::ScaleSnapshot` over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScaleInfo {
+    /// Native-to-scaled ratio (`native / scaled`).
+    pub ratio: f64,
+    /// Captured monitor's top-left in virtual-desktop coords.
+    pub monitor_origin: [i32; 2],
+    /// Native monitor width in physical pixels.
+    pub native_w: u32,
+    /// Native monitor height in physical pixels.
+    pub native_h: u32,
+    /// Scaled image width.
+    pub scaled_w: u32,
+    /// Scaled image height.
+    pub scaled_h: u32,
+}
+
+// ---------------------------------------------------------------------------
+// v2 — Windows helper request structs (Task 9)
+// ---------------------------------------------------------------------------
+
+/// Top-level `Request::Computer` payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComputerRequest {
+    /// The action to dispatch.
+    pub action: ComputerAction,
+}
+
+/// Filter for the v2 `list_windows` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ListWindowsRequest {
+    /// Substring match against window title.
+    pub title_substr: Option<String>,
+    /// Substring match against owning process name.
+    pub process_name: Option<String>,
+}
+
+/// Argument for the v2 `focus_window` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FocusWindowRequest {
+    /// Target HWND.
+    pub hwnd: u64,
+}
+
+/// Argument for the v2 `wait_for_window` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WaitForWindowRequest {
+    /// Substring match against window title.
+    pub title_substr: Option<String>,
+    /// Substring match against owning process name.
+    pub process_name: Option<String>,
+    /// Maximum time to poll, in milliseconds.
+    pub timeout_ms: u32,
+}
+
+/// Filter for the v2 `list_processes` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ListProcessesRequest {
+    /// Substring match against process name.
+    pub name_substr: Option<String>,
+    /// When true, exclude background-only processes.
+    pub visible_only: bool,
+}
+
+/// Argument for the v2 `kill_process` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KillProcessRequest {
+    /// Kill by process ID.
+    Pid {
+        /// Target PID.
+        pid: u32,
+    },
+    /// Kill by process executable stem (no extension).
+    Name {
+        /// Target process stem (e.g. `"notepad"`).
+        stem: String,
+    },
+}
+
+/// Argument for the v2 `launch_app` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LaunchAppRequest {
+    /// App name, full path, or URI scheme to launch.
+    pub target: String,
+}
+
+/// Argument for the v2 `shell_exec` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShellExecRequest {
+    /// Command line to execute.
+    pub command: String,
+    /// `"powershell"`, `"cmd"`, or `None` for the default shell.
+    pub shell: Option<String>,
+}
+
+/// Argument for the v2 `clipboard_set_text` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClipboardSetTextRequest {
+    /// Text to write to the clipboard.
+    pub text: String,
+}
+
+/// Argument for the v2 `inspect_at` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InspectAtRequest {
+    /// X coordinate in native virtual-desktop pixels.
+    pub x: i32,
+    /// Y coordinate in native virtual-desktop pixels.
+    pub y: i32,
+}
+
+/// Argument for the v2 `uia_query` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiaQueryRequest {
+    /// Selector grammar from v1 (ByName / ByControlType / ByClass /
+    /// ByAutomationId / And / Or / Not).
+    pub selector: crate::selector::Selector,
+    /// Root HWND to search under; `None` = foreground window.
+    pub root_hwnd: Option<u64>,
+    /// Maximum number of results to return.
+    pub max_results: Option<u32>,
+}
+
+/// Argument for the v2 `uia_tree` MCP tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiaTreeRequest {
+    /// Window to dump; `None` = foreground window.
+    pub hwnd: Option<u64>,
+    /// Maximum tree depth to walk.
+    pub max_depth: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — computer_action_tests (Task 9, Step 1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod computer_action_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_action_round_trips() {
+        let a = ComputerAction::Screenshot { monitor: Some(1) };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: ComputerAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+        assert!(json.contains("\"action\":\"screenshot\""));
+    }
+
+    #[test]
+    fn left_click_action_round_trips_with_humanize_default() {
+        let json = r#"{"action":"left_click","coordinate":[100,200]}"#;
+        let a: ComputerAction = serde_json::from_str(json).unwrap();
+        match a {
+            ComputerAction::LeftClick { coordinate, humanize, .. } => {
+                assert_eq!(coordinate, [100, 200]);
+                assert!(humanize, "humanize defaults to true");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn left_click_action_honors_explicit_humanize_false() {
+        let json = r#"{"action":"left_click","coordinate":[1,2],"humanize":false}"#;
+        let a: ComputerAction = serde_json::from_str(json).unwrap();
+        match a {
+            ComputerAction::LeftClick { humanize, .. } => assert!(!humanize),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn key_chord_is_a_string_field() {
+        let a = ComputerAction::Key { text: "ctrl+s".into() };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"text\":\"ctrl+s\""));
+    }
+
+    #[test]
+    fn scroll_direction_serializes_snake_case() {
+        let a = ComputerAction::Scroll {
+            coordinate: [10, 20],
+            scroll_direction: ScrollDir::Down,
+            scroll_amount: 3,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"scroll_direction\":\"down\""));
+    }
 }
 
 #[cfg(test)]
