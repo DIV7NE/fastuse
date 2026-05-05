@@ -47,6 +47,7 @@ thiserror = "1"
 anyhow = "1"
 once_cell = "1"
 scopeguard = "1"
+dashmap = "6"
 
 # Build helpers
 embed-resource = "2"

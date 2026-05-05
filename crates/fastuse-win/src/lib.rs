@@ -26,6 +26,7 @@ pub mod input_thread;
 pub mod launch;
 pub mod process;
 pub mod shell;
+pub mod targeting;
 pub mod uia;
 pub mod uia_pool;
 pub mod window;
