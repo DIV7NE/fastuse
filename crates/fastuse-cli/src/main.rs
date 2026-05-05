@@ -1,6 +1,7 @@
 //! fastuse-cli — local helper CLI for the daemon.
 
 mod bench;
+mod cmd_autostart;
 mod cmd_computer;
 mod cmd_phase2;
 mod cmd_phase3;
@@ -347,6 +348,12 @@ enum Cmd {
     // ----- setup -----
     /// Register fastuse-mcp.exe in Claude Code's settings.json (idempotent).
     SetupMcp(SetupMcpArgs),
+    /// Register the daemon as an at-logon Scheduled Task with highest
+    /// privileges. One UAC prompt now; daemon auto-starts at every Windows
+    /// logon thereafter with no further UAC prompts.
+    InstallAutostart,
+    /// Remove the at-logon Scheduled Task created by `install-autostart`.
+    UninstallAutostart,
 }
 
 #[derive(Subcommand, Debug)]
@@ -833,6 +840,12 @@ fn main() {
 
             // ---- setup-mcp ----
             Cmd::SetupMcp(args) => cmd_setup_mcp::run(args.user, args.project),
+
+            // ---- autostart ----
+            Cmd::InstallAutostart => cmd_autostart::install()
+                .map_err(|e| anyhow::anyhow!("install-autostart: {e}")),
+            Cmd::UninstallAutostart => cmd_autostart::uninstall()
+                .map_err(|e| anyhow::anyhow!("uninstall-autostart: {e}")),
 
             // ---- Bench ----
             Cmd::Bench { kind } => match kind {
