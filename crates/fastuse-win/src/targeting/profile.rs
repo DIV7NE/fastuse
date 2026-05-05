@@ -3,10 +3,13 @@
 
 use dashmap::DashMap;
 use fastuse_proto::coords::Rect;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use windows::Win32::Foundation::FILETIME;
 
 use crate::targeting::candidate::TargetCandidate;
+use crate::uia_pool::UiaPoolHandle;
 
 /// Composite cache key. HWND alone is unsafe — Windows reuses HWND values on
 /// long-lived sessions; without `pid` + `process_start_time` a stale entry can
@@ -34,7 +37,7 @@ impl ProfileCacheKey {
 
 /// Heuristic verdict on whether the UIA tree exposed for this window is rich
 /// enough to act on directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TreeQuality {
     /// Named descendants with AutomationIds, multiple ControlTypes — ordinary.
     Healthy,
@@ -47,7 +50,7 @@ pub enum TreeQuality {
 }
 
 /// Process integrity level — for UIPI gate before action attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntegrityLevel {
     /// Lower than ours — fine, but we shouldn't be elevated against it.
     Low,
@@ -62,7 +65,7 @@ pub enum IntegrityLevel {
 
 /// Signals describing the target window. Hint, not authority — `framework_id`
 /// can lie (mixed-provider Electron+WebView2), `window_class` is the hard backstop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowSignals {
     /// `IUIAutomation::NativeWindowHandle.FrameworkId` — provider-reported,
     /// may be missing/stale for mixed-provider apps.
@@ -106,12 +109,278 @@ fn cache() -> &'static DashMap<ProfileCacheKey, TargetProfile> {
     PROFILE_CACHE.get_or_init(DashMap::new)
 }
 
-/// Resolve or build a profile for `hwnd`. Returns the cached profile if the
-/// composite key still matches. Real implementation lives behind a closure
-/// dispatched to `uia_pool` (Task 3 wires the actual probing).
-pub fn profile_window(_hwnd: u64) -> Result<TargetProfile, ProfileError> {
-    // Stub — Task 3 implements the real probe via uia_pool.
-    Err(ProfileError::NotImplemented)
+/// Resolve or build a profile for `hwnd` using the supplied UIA pool.
+/// Caches under `ProfileCacheKey { hwnd, pid, process_start, generation: 0 }`
+/// initially; later actions bump generation when bounds invalidate.
+pub fn profile_window(
+    hwnd: u64,
+    uia: &Arc<UiaPoolHandle>,
+) -> Result<TargetProfile, ProfileError> {
+    let pid = pid_of_hwnd(hwnd)?;
+    let process_start = process_start_time(pid).unwrap_or(0);
+    let key = ProfileCacheKey {
+        hwnd,
+        pid,
+        process_start,
+        generation: 0,
+    };
+
+    if let Some(p) = cache().get(&key) {
+        return Ok(p.clone());
+    }
+
+    // Run the probe on the UIA pool — D-25 invariant.
+    let signals = uia
+        .run(move |_uia| {
+            probe_on_uia_thread(hwnd).map_err(|e| {
+                fastuse_proto::Error::new(
+                    fastuse_proto::ErrorCode::Internal,
+                    format!("profile probe: {e}"),
+                )
+            })
+        })
+        .map_err(|_| ProfileError::UiaUnavailable)?;
+
+    let profile = TargetProfile {
+        window: signals,
+        candidates: Vec::new(), // populated per-action by Task 4
+    };
+    cache().insert(key, profile.clone());
+    Ok(profile)
+}
+
+fn pid_of_hwnd(hwnd: u64) -> Result<u32, ProfileError> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    let mut pid = 0u32;
+    // SAFETY: HWND is opaque; PID out-pointer is u32 stack slot.
+    let tid = unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid)) };
+    if tid == 0 {
+        return Err(ProfileError::WindowGone);
+    }
+    Ok(pid)
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: OpenProcess with QUERY_LIMITED is the documented way to query
+    // start-time of arbitrary processes; fails closed when permission denied.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let res = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+    res.ok()?;
+    Some(ProfileCacheKey::flatten_filetime(creation))
+}
+
+/// Runs on the UIA pool MTA worker. All `windows::*` and `uiautomation::*`
+/// calls happen here.
+fn probe_on_uia_thread(hwnd: u64) -> Result<WindowSignals, ProfileError> {
+    use windows::Win32::Foundation::HWND;
+    let h = HWND(hwnd as *mut _);
+    let window_class = read_class_name(h);
+    let child_classes = collect_child_classes(h, 2);
+    let cloaked = read_cloaked(h);
+    let minimized = read_minimized(h);
+    let occluded = false; // detailed handling deferred to v1.1
+    let dwm_extended_frame_bounds = read_dwm_extended_frame(h);
+    let is_foreground = read_foreground(h);
+    let framework_id = read_framework_id(h);
+    let uia_tree_quality = probe_tree_quality(h);
+    let integrity_level = read_integrity_level(h);
+
+    Ok(WindowSignals {
+        framework_id,
+        window_class,
+        child_classes,
+        uia_tree_quality,
+        integrity_level,
+        cloaked,
+        minimized,
+        occluded,
+        dwm_extended_frame_bounds,
+        is_foreground,
+    })
+}
+
+fn read_class_name(h: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buf = [0u16; 256];
+    // SAFETY: GetClassNameW writes at most buf.len() wide chars + NUL.
+    let n = unsafe { GetClassNameW(h, &mut buf) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize])
+}
+
+fn collect_child_classes(
+    h: windows::Win32::Foundation::HWND,
+    max_depth: u32,
+) -> Vec<String> {
+    use std::cell::RefCell;
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, IsWindowVisible};
+
+    thread_local!(static SINK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) });
+    SINK.with(|s| s.borrow_mut().clear());
+
+    extern "system" fn cb(hwnd: HWND, _lp: LPARAM) -> BOOL {
+        if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            let cls = read_class_name(hwnd);
+            if !cls.is_empty() {
+                SINK.with(|s| s.borrow_mut().push(cls));
+            }
+        }
+        BOOL(1)
+    }
+
+    let _ = max_depth; // EnumChildWindows is recursive in Win32 native; we accept that.
+    // SAFETY: EnumChildWindows runs cb synchronously on this thread.
+    let _ = unsafe { EnumChildWindows(Some(h), Some(cb), LPARAM(0)) };
+    SINK.with(|s| s.borrow_mut().drain(..).collect())
+}
+
+fn read_cloaked(h: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    let mut cloaked: u32 = 0;
+    // SAFETY: DwmGetWindowAttribute writes a u32 when DWMWA_CLOAKED is queried.
+    let res = unsafe {
+        DwmGetWindowAttribute(
+            h,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as _,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    res.is_ok() && cloaked != 0
+}
+
+fn read_minimized(h: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+    // SAFETY: IsIconic is a pure HWND query.
+    unsafe { IsIconic(h) }.as_bool()
+}
+
+fn read_dwm_extended_frame(h: windows::Win32::Foundation::HWND) -> Rect {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    let mut r = RECT::default();
+    // SAFETY: DwmGetWindowAttribute writes a RECT for DWMWA_EXTENDED_FRAME_BOUNDS.
+    let res = unsafe {
+        DwmGetWindowAttribute(
+            h,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut RECT as _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if res.is_err() {
+        return Rect { x: 0, y: 0, w: 0, h: 0 };
+    }
+    Rect {
+        x: r.left,
+        y: r.top,
+        w: (r.right - r.left).max(0),
+        h: (r.bottom - r.top).max(0),
+    }
+}
+
+fn read_foreground(h: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // SAFETY: GetForegroundWindow has no preconditions.
+    let fg = unsafe { GetForegroundWindow() };
+    fg == h
+}
+
+fn read_framework_id(_h: windows::Win32::Foundation::HWND) -> Option<String> {
+    // Read via uiautomation 0.24 — `UIElement::get_framework_id` returns
+    // BSTR. Done in `probe_on_uia_thread` context via the uia_pool's
+    // CUIAutomation singleton; needs the singleton accessor exposed by
+    // crates/fastuse-win/src/uia_pool.rs. Wire in Task 4 alongside
+    // candidate resolution since both use the same singleton.
+    None
+}
+
+fn probe_tree_quality(_h: windows::Win32::Foundation::HWND) -> TreeQuality {
+    // Heuristic — wire in Task 4 alongside candidate resolution. For now,
+    // assume Healthy; the Task-3 commit ships signals only.
+    TreeQuality::Healthy
+}
+
+fn read_integrity_level(h: windows::Win32::Foundation::HWND) -> IntegrityLevel {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let mut pid = 0u32;
+    let tid = unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    if tid == 0 {
+        return IntegrityLevel::Unknown;
+    }
+    // SAFETY: standard PROCESS_QUERY_LIMITED_INFORMATION + TOKEN_QUERY ladder.
+    let proc_h = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(h) => h,
+        Err(_) => return IntegrityLevel::Unknown,
+    };
+    let mut tok = HANDLE::default();
+    let ok = unsafe { OpenProcessToken(proc_h, TOKEN_QUERY, &mut tok) };
+    let _ = unsafe { CloseHandle(proc_h) };
+    if ok.is_err() {
+        return IntegrityLevel::Unknown;
+    }
+    let mut size = 0u32;
+    let _ = unsafe {
+        GetTokenInformation(tok, TokenIntegrityLevel, None, 0, &mut size)
+    };
+    if size == 0 {
+        let _ = unsafe { CloseHandle(tok) };
+        return IntegrityLevel::Unknown;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let res = unsafe {
+        GetTokenInformation(
+            tok,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as _),
+            size,
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(tok) };
+    if res.is_err() {
+        return IntegrityLevel::Unknown;
+    }
+    // The SID's last sub-authority encodes the IL: 0x2000=Low, 0x2000-0x3000=Medium,
+    // 0x3000-0x4000=High. Read the count and last sub-authority via raw pointer.
+    let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let sid = label.Label.Sid;
+    if sid.0.is_null() {
+        return IntegrityLevel::Unknown;
+    }
+    use windows::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount};
+    let count = unsafe { *GetSidSubAuthorityCount(sid) };
+    if count == 0 {
+        return IntegrityLevel::Unknown;
+    }
+    let last = unsafe { *GetSidSubAuthority(sid, (count - 1) as u32) };
+    match last {
+        x if x < 0x2000 => IntegrityLevel::Low,
+        x if x < 0x3000 => IntegrityLevel::Medium,
+        x if x < 0x4000 => IntegrityLevel::High,
+        _ => IntegrityLevel::High,
+    }
 }
 
 /// Drop a cache entry. Called from process-exit / window-destroy hooks (already
@@ -148,6 +417,21 @@ mod tests {
         };
         let copy = k;
         assert_eq!(k, copy);
+    }
+
+    #[test]
+    fn read_class_name_of_invalid_hwnd_is_empty() {
+        use windows::Win32::Foundation::HWND;
+        let s = read_class_name(HWND(std::ptr::null_mut()));
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn read_minimized_handles_invalid_hwnd() {
+        use windows::Win32::Foundation::HWND;
+        let _ = read_minimized(HWND(std::ptr::null_mut()));
+        // Expectation: does not panic. Return value is meaningless for an
+        // invalid HWND but the call must be safe.
     }
 
     #[test]
