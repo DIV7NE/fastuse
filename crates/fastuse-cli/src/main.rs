@@ -1,6 +1,7 @@
 //! fastuse-cli — local helper CLI for the daemon.
 
 mod bench;
+mod cmd_computer;
 mod cmd_phase2;
 mod cmd_phase3;
 mod cmd_phase4;
@@ -325,6 +326,10 @@ enum Cmd {
         #[command(subcommand)]
         kind: BenchCmd,
     },
+
+    // ----- v2 computer subcommands (native pixel coords, no scale) -----
+    /// computer_20251124-compatible actions with native virtual-desktop coords.
+    Computer(ComputerArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -334,6 +339,179 @@ enum BenchCmd {
         /// Scenario: calculator | discord | lconnect3 | all.
         #[arg(long)]
         scenario: String,
+    },
+}
+
+/// Top-level wrapper for `computer` subcommands.
+#[derive(clap::Args, Debug)]
+struct ComputerArgs {
+    #[command(subcommand)]
+    action: ComputerSubcmd,
+}
+
+/// All `computer` sub-actions. Coordinates are native virtual-desktop pixels.
+#[derive(Subcommand, Debug)]
+enum ComputerSubcmd {
+    /// Capture a screenshot of monitor N (default primary).
+    Screenshot {
+        /// Output file path. Raw encoded bytes (JPEG/PNG), not base64.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Monitor index (0 = primary).
+        #[arg(long)]
+        monitor: Option<u32>,
+        /// Output format: jpeg (default) or png.
+        #[arg(long, default_value = "jpeg")]
+        format: String,
+    },
+    /// Single primary-button click at (X, Y).
+    LeftClick {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Modifier chord to hold during the click, e.g. `"ctrl+shift"`.
+        #[arg(long)]
+        modifiers: Option<String>,
+        /// Skip Bezier-curve humanization — click fires immediately.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Single secondary-button click at (X, Y).
+    RightClick {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Skip Bezier-curve humanization.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Single middle-button click at (X, Y).
+    MiddleClick {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Skip Bezier-curve humanization.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Two primary-button clicks at (X, Y).
+    DoubleClick {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Skip Bezier-curve humanization.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Three primary-button clicks at (X, Y) — select-all equivalent.
+    TripleClick {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Skip Bezier-curve humanization.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Click-drag from (SX, SY) to (EX, EY) holding left button.
+    Drag {
+        /// Drag start x in native virtual-desktop pixels.
+        sx: i32,
+        /// Drag start y in native virtual-desktop pixels.
+        sy: i32,
+        /// Drag end x in native virtual-desktop pixels.
+        ex: i32,
+        /// Drag end y in native virtual-desktop pixels.
+        ey: i32,
+        /// Modifier chord held during the drag, e.g. `"ctrl"`.
+        #[arg(long)]
+        modifiers: Option<String>,
+        /// Skip humanized Bezier motion.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Type literal Unicode text.
+    Type {
+        /// Text to type (sent via SendInput KEYEVENTF_UNICODE).
+        text: String,
+        /// Skip per-keystroke timing jitter.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Press a key chord (e.g. `ctrl+s`, `alt+f4`, `enter`).
+    Key {
+        /// Chord string in xdotool-style syntax.
+        chord: String,
+    },
+    /// Press a chord and hold it for --ms milliseconds.
+    HoldKey {
+        /// Chord string in xdotool-style syntax.
+        chord: String,
+        /// Hold duration in milliseconds.
+        #[arg(long)]
+        ms: u32,
+    },
+    /// Mouse-wheel scroll at (X, Y).
+    Scroll {
+        /// Scroll origin x in native virtual-desktop pixels.
+        x: i32,
+        /// Scroll origin y in native virtual-desktop pixels.
+        y: i32,
+        /// Direction: up | down | left | right.
+        #[arg(long)]
+        direction: String,
+        /// Number of wheel ticks.
+        #[arg(long, default_value_t = 3)]
+        amount: i32,
+    },
+    /// Move the cursor to (X, Y) without clicking.
+    MouseMove {
+        /// Target x in native virtual-desktop pixels.
+        x: i32,
+        /// Target y in native virtual-desktop pixels.
+        y: i32,
+        /// Skip humanized Bezier motion.
+        #[arg(long)]
+        instant: bool,
+    },
+    /// Read the current cursor position.
+    CursorPosition,
+    /// Sleep for MS milliseconds (server-side).
+    Wait {
+        /// Sleep duration in milliseconds.
+        ms: u32,
+    },
+    /// Zoom/crop around (X, Y) and push a new ScaleSnapshot.
+    Zoom {
+        /// Center x in native virtual-desktop pixels.
+        x: i32,
+        /// Center y in native virtual-desktop pixels.
+        y: i32,
+        /// Zoom factor (e.g. 2.0 = 2×).
+        #[arg(long, default_value_t = 2.0)]
+        factor: f32,
+    },
+    /// Press left mouse button down at optional (X, Y).
+    LeftMouseDown {
+        /// Optional x; defaults to current cursor x when absent.
+        #[arg(long)]
+        x: Option<i32>,
+        /// Optional y; defaults to current cursor y when absent.
+        #[arg(long)]
+        y: Option<i32>,
+    },
+    /// Release left mouse button at optional (X, Y).
+    LeftMouseUp {
+        /// Optional x; defaults to current cursor x when absent.
+        #[arg(long)]
+        x: Option<i32>,
+        /// Optional y; defaults to current cursor y when absent.
+        #[arg(long)]
+        y: Option<i32>,
     },
 }
 
@@ -539,6 +717,64 @@ fn main() {
                     if force { Some(true) } else { None },
                     if process_tree { Some(true) } else { None },
                 ).await
+            }
+
+            // ---- v2 computer subcommands ----
+            Cmd::Computer(ComputerArgs { action }) => {
+                let path = &identity.path;
+                match action {
+                    ComputerSubcmd::Screenshot { out, monitor, format } => {
+                        cmd_computer::screenshot(path, out.as_deref(), monitor, &format).await
+                    }
+                    ComputerSubcmd::LeftClick { x, y, modifiers, instant } => {
+                        cmd_computer::left_click(path, x, y, modifiers, instant).await
+                    }
+                    ComputerSubcmd::RightClick { x, y, instant } => {
+                        cmd_computer::right_click(path, x, y, instant).await
+                    }
+                    ComputerSubcmd::MiddleClick { x, y, instant } => {
+                        cmd_computer::middle_click(path, x, y, instant).await
+                    }
+                    ComputerSubcmd::DoubleClick { x, y, instant } => {
+                        cmd_computer::double_click(path, x, y, instant).await
+                    }
+                    ComputerSubcmd::TripleClick { x, y, instant } => {
+                        cmd_computer::triple_click(path, x, y, instant).await
+                    }
+                    ComputerSubcmd::Drag { sx, sy, ex, ey, modifiers, instant } => {
+                        cmd_computer::drag(path, sx, sy, ex, ey, modifiers, instant).await
+                    }
+                    ComputerSubcmd::Type { text, instant } => {
+                        cmd_computer::type_text(path, text, instant).await
+                    }
+                    ComputerSubcmd::Key { chord } => {
+                        cmd_computer::key(path, chord).await
+                    }
+                    ComputerSubcmd::HoldKey { chord, ms } => {
+                        cmd_computer::hold_key(path, chord, ms).await
+                    }
+                    ComputerSubcmd::Scroll { x, y, direction, amount } => {
+                        cmd_computer::scroll(path, x, y, &direction, amount).await
+                    }
+                    ComputerSubcmd::MouseMove { x, y, instant } => {
+                        cmd_computer::mouse_move(path, x, y, instant).await
+                    }
+                    ComputerSubcmd::CursorPosition => {
+                        cmd_computer::cursor_position(path).await
+                    }
+                    ComputerSubcmd::Wait { ms } => {
+                        cmd_computer::wait(path, ms).await
+                    }
+                    ComputerSubcmd::Zoom { x, y, factor } => {
+                        cmd_computer::zoom(path, x, y, factor).await
+                    }
+                    ComputerSubcmd::LeftMouseDown { x, y } => {
+                        cmd_computer::left_mouse_down(path, x, y).await
+                    }
+                    ComputerSubcmd::LeftMouseUp { x, y } => {
+                        cmd_computer::left_mouse_up(path, x, y).await
+                    }
+                }
             }
 
             // ---- Bench ----
