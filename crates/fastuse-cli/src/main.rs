@@ -1,5 +1,6 @@
 //! fastuse-cli — local helper CLI for the daemon.
 
+mod bench;
 mod cmd_phase2;
 mod cmd_phase3;
 mod cmd_phase4;
@@ -344,6 +345,23 @@ enum Cmd {
     // ----- Warmup -----
     /// Warm every cold path (D3D11, DXGI, UIA root, monitors). Idempotent.
     Warmup,
+
+    // ----- Bench -----
+    /// Aimbot smoke fixtures.
+    Bench {
+        #[command(subcommand)]
+        kind: BenchCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BenchCmd {
+    /// Run an aimbot smoke scenario.
+    Aimbot {
+        /// Scenario: calculator | discord | lconnect3 | all.
+        #[arg(long)]
+        scenario: String,
+    },
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -586,6 +604,37 @@ fn main() {
                     if process_tree { Some(true) } else { None },
                 ).await
             }
+
+            // ---- Bench ----
+            Cmd::Bench { kind } => match kind {
+                BenchCmd::Aimbot { scenario } => {
+                    let reports: Vec<bench::aimbot::ScenarioReport> = match scenario.as_str() {
+                        "calculator" => vec![bench::aimbot::run_calculator().await],
+                        "discord" => vec![bench::aimbot::run_discord().await],
+                        "lconnect3" => vec![bench::aimbot::run_lconnect3().await],
+                        "all" => vec![
+                            bench::aimbot::run_calculator().await,
+                            bench::aimbot::run_discord().await,
+                            bench::aimbot::run_lconnect3().await,
+                        ],
+                        other => {
+                            eprintln!("unknown scenario: {other}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let all_pass = reports.iter().all(|r| r.pass);
+                    let json = if reports.len() == 1 {
+                        serde_json::to_string_pretty(&reports[0])?
+                    } else {
+                        serde_json::to_string_pretty(&reports)?
+                    };
+                    println!("{json}");
+                    if !all_pass {
+                        std::process::exit(1);
+                    }
+                    Ok(())
+                }
+            },
 
             // ---- Warmup ----
             Cmd::Warmup => {
