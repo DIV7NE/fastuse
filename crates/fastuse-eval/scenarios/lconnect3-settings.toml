@@ -1,0 +1,18 @@
+name = "lconnect3-open-settings"
+tier = 2
+task = """
+L-Connect3 is open and visible on screen (user must launch it manually —
+the install path varies). Click the Settings tab in L-Connect3, then click
+the "System info" toggle to enable the floating system info window.
+"""
+timeout_seconds = 120
+
+[launch]
+command = "lconnect3-prereq"
+args = []
+wait_for_window_title_substr = "L-Connect"
+wait_timeout_ms = 5000
+
+[success]
+kind = "ScreenshotContainsText"
+needle = "System info"

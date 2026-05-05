@@ -1,0 +1,18 @@
+name = "steam-search-game"
+tier = 2
+task = """
+Steam is open and signed in (user prerequisite). In the Steam window, click
+the "Store" tab, then click into the search box. Type "Portal 2" and verify
+the search results show Portal 2 in the results list.
+"""
+timeout_seconds = 90
+
+[launch]
+command = "steam-prereq"
+args = []
+wait_for_window_title_substr = "Steam"
+wait_timeout_ms = 5000
+
+[success]
+kind = "ScreenshotContainsText"
+needle = "Portal 2"

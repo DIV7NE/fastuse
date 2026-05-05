@@ -1,0 +1,17 @@
+name = "image-editor-basic-edit"
+tier = 2
+task = """
+Open GIMP (or Photoshop if installed). Create a new 100x100 image with white
+background. Use the bucket fill tool to fill it red. Save as %TEMP%\\fastuse-eval-red.png.
+"""
+timeout_seconds = 180
+
+[launch]
+command = "gimp"
+args = []
+wait_for_window_title_substr = "GIMP"
+wait_timeout_ms = 15000
+
+[success]
+kind = "Shell"
+command = 'powershell -Command "if (Test-Path $env:TEMP\\fastuse-eval-red.png) { exit 0 } else { exit 1 }"'
