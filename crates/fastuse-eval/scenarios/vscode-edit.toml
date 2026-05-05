@@ -1,0 +1,17 @@
+name = "vscode-edit-save"
+tier = 1
+task = """
+Open VS Code with no folder. Use Ctrl+N to create a new file. Type a small
+Python function that returns 42. Save the file as %TEMP%\\fastuse-eval-vscode.py.
+"""
+timeout_seconds = 120
+
+[launch]
+command = "code"
+args = ["--new-window", "--disable-extensions"]
+wait_for_window_title_substr = "Visual Studio Code"
+wait_timeout_ms = 10000
+
+[success]
+kind = "Shell"
+command = 'powershell -Command "if ((Get-Content $env:TEMP\\fastuse-eval-vscode.py -Raw) -match \"return 42\") { exit 0 } else { exit 1 }"'

@@ -1,0 +1,18 @@
+name = "chrome-fill-search"
+tier = 1
+task = """
+Open Google Chrome. In the address bar, navigate to https://www.google.com.
+Type "fastuse computer use" into the search box and press Enter. Verify
+search results loaded.
+"""
+timeout_seconds = 90
+
+[launch]
+command = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+args = ["--new-window", "https://www.google.com"]
+wait_for_window_title_substr = "Google"
+wait_timeout_ms = 8000
+
+[success]
+kind = "ScreenshotContainsText"
+needle = "fastuse"
