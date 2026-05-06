@@ -6,6 +6,7 @@ use fastuse_proto::{
     ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, KillProcess, LaunchApp,
     ListProcesses, ProcFilter, ProcessSelector, Redact, Request, Response, ShellExec, ShellKind,
 };
+use std::time::Duration;
 use serde_json::json;
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
@@ -114,19 +115,70 @@ pub async fn shell_exec(
     }
 }
 
-pub async fn launch_app(pipe_path: &str, query: String) -> anyhow::Result<()> {
+pub async fn launch_app(pipe_path: &str, query: String, focus: bool) -> anyhow::Result<()> {
     let req = Request::LaunchApp { req: LaunchApp { query }, opts: None };
-    match one_call(pipe_path, req).await? {
-        Response::LaunchApp(r) => {
+    let resp = match one_call(pipe_path, req).await? {
+        Response::LaunchApp(r) => r,
+        Response::Error(e) => return print_err(e),
+        other => return Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    };
+
+    if !focus || resp.pid == 0 {
+        println!(
+            "{}",
+            json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class})
+        );
+        return Ok(());
+    }
+
+    // --focus: snapshot the current foreground HWND, then poll until it
+    // changes (meaning the launched app stole focus). Timeout 4s. Works for
+    // UWP stubs (calc.exe) which take 1-2s to hand off to the real process.
+    let pre_hwnd = {
+        let mut pipe = connect_or_spawn(pipe_path).await?;
+        handshake(&mut pipe).await?;
+        write_request(&mut pipe, &Request::ForegroundWindow).await?;
+        match read_response(&mut pipe).await? {
+            Response::Window(w) => w.hwnd,
+            _ => 0,
+        }
+    };
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(4000);
+    let focused_window = loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut pipe = connect_or_spawn(pipe_path).await?;
+        handshake(&mut pipe).await?;
+        write_request(&mut pipe, &Request::ForegroundWindow).await?;
+        match read_response(&mut pipe).await? {
+            Response::Window(w) if w.hwnd != pre_hwnd && w.hwnd != 0 => break Some(w),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break None;
+        }
+    };
+
+    match focused_window {
+        Some(w) => {
+            // Re-assert focus so the model can immediately start typing.
+            let mut pipe = connect_or_spawn(pipe_path).await?;
+            handshake(&mut pipe).await?;
+            write_request(&mut pipe, &Request::FocusWindow { hwnd: w.hwnd, opts: None }).await?;
+            let _ = read_response(&mut pipe).await;
             println!(
                 "{}",
-                json!({"ok": true, "pid": r.pid, "hwnd": r.hwnd, "title": r.title, "class": r.class})
+                json!({"ok": true, "pid": resp.pid, "hwnd": w.hwnd, "title": w.title, "class": w.class, "focused": true})
             );
-            Ok(())
         }
-        Response::Error(e) => print_err(e),
-        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+        None => {
+            println!(
+                "{}",
+                json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class})
+            );
+        }
     }
+    Ok(())
 }
 
 pub async fn list_processes(

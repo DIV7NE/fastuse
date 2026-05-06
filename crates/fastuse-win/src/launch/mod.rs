@@ -26,6 +26,13 @@ use fastuse_core::FastuseError;
 use fastuse_proto::{LaunchApp, LaunchAppResp};
 
 /// Launch an application by query.
+///
+/// Resolution order:
+/// 1. URI protocol (`scheme:...`) — delegated to `ShellExecuteW` with the
+///    "open" verb so the registered protocol handler fires (e.g. `ms-outlook:`,
+///    `http:`, `vscode:`).
+/// 2. Explicit path — query contains `\`, `/`, or ends in `.exe`/`.bat`/etc.
+/// 3. PATH lookup — bare binary name walked against `%PATH%`.
 #[tracing::instrument(skip(req), fields(query = %req.query))]
 pub fn launch_app(req: LaunchApp) -> Result<LaunchAppResp, FastuseError> {
     let q = req.query.trim();
@@ -33,11 +40,19 @@ pub fn launch_app(req: LaunchApp) -> Result<LaunchAppResp, FastuseError> {
         return Err(FastuseError::AppNotFound { query: req.query });
     }
 
-    // Strategy 1: explicit path.
-    let exe_path = if looks_like_path(q) {
+    // Strategy 0: URI protocol handler.
+    if looks_like_uri(q) {
+        return launch_uri(q);
+    }
+
+    // Strategy 1: explicit path (contains separators → treat as literal path).
+    // Strategy 2: PATH lookup for bare names — including `calc.exe`, `notepad.exe`.
+    //   `looks_like_path` fires for `.exe`-suffixed bare names too, but creating
+    //   a relative PathBuf from them and calling `.exists()` against the daemon's
+    //   CWD always fails. Always PATH-search when there are no path separators.
+    let exe_path = if q.contains('\\') || q.contains('/') {
         Some(PathBuf::from(q))
     } else {
-        // Strategy 4: PATH lookup.
         find_on_path(q)
     };
 
@@ -53,6 +68,63 @@ pub fn launch_app(req: LaunchApp) -> Result<LaunchAppResp, FastuseError> {
         title: None,
         class: None,
     })
+}
+
+/// Detect a URI protocol scheme: `scheme:...` where scheme is >1 char (to
+/// exclude drive letters like `C:`) and all scheme chars are alphanumeric or
+/// the RFC 3986-allowed `+`, `-`, `.`.
+fn looks_like_uri(q: &str) -> bool {
+    let Some(colon_pos) = q.find(':') else { return false };
+    if colon_pos <= 1 {
+        return false; // Single-char prefix = Windows drive letter (C:, D:)
+    }
+    q[..colon_pos]
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Launch a URI via `ShellExecuteW` with the "open" verb. This delegates to
+/// whatever protocol handler Windows has registered for the scheme
+/// (e.g. `ms-outlook:` → Outlook, `http:` → default browser, `vscode:` → VS Code).
+/// Returns `pid: 0` because ShellExecuteW for URI handlers doesn't give a
+/// reliable PID — use `list-windows` afterwards to find the HWND.
+fn launch_uri(uri: &str) -> Result<LaunchAppResp, FastuseError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWDEFAULT;
+
+    // Encode "open" verb and URI to null-terminated UTF-16.
+    let verb: Vec<u16> = OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+    let file: Vec<u16> = OsStr::new(uri)
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    // SAFETY: pointers are valid for the call duration; None = NULL HWND = desktop owner.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWDEFAULT,
+        )
+    };
+
+    // Per MSDN, HINSTANCE > 32 means success.
+    if result.0 as isize > 32 {
+        Ok(LaunchAppResp { pid: 0, hwnd: None, title: None, class: None })
+    } else {
+        Err(FastuseError::AppNotFound {
+            query: format!("{uri}: ShellExecuteW returned {} — no handler registered?", result.0 as isize),
+        })
+    }
 }
 
 fn looks_like_path(q: &str) -> bool {
@@ -125,7 +197,7 @@ fn spawn_and_get_pid(exe_path: &Path) -> Result<u32, FastuseError> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    // CREATE_NO_WINDOW + DETACHED_PROCESS-ish: we want the child to live past us.
+    // CREATE_NO_WINDOW: we want the child to live past us.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let child = Command::new(exe_path)
         .creation_flags(CREATE_NO_WINDOW)
@@ -137,18 +209,9 @@ fn spawn_and_get_pid(exe_path: &Path) -> Result<u32, FastuseError> {
             query: format!("{}: {e}", exe_path.display()),
         })?;
     let pid = child.id();
-    // Wait briefly to detect immediate death (UAC-elevated silent fail risk).
-    std::thread::sleep(Duration::from_millis(100));
-    let alive = is_pid_alive(pid);
-    if !alive {
-        return Err(FastuseError::AppNotFound {
-            query: format!(
-                "{}: process exited immediately (try running daemon as administrator?)",
-                exe_path.display()
-            ),
-        });
-    }
-    // Don't await/wait — let the child run free.
+    // Don't await — let the child run free.
+    // Note: UWP launcher stubs (calc.exe, etc.) exit immediately after handing
+    // off to the UWP host; no alive check here so they succeed normally.
     std::mem::forget(child);
     let _ = Instant::now;
     Ok(pid)

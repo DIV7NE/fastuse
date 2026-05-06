@@ -330,6 +330,12 @@ enum Cmd {
     LaunchApp {
         /// Path / PATH binary / URI / app name.
         query: String,
+        /// After spawning, wait up to 1.5 s for the app to steal foreground,
+        /// then assert focus and return the HWND. Use this when you intend to
+        /// type or click into the app immediately after launch — it saves the
+        /// extra list-windows + focus-window round-trips.
+        #[arg(long)]
+        focus: bool,
     },
     /// Enumerate running processes.
     ListProcesses {
@@ -807,7 +813,7 @@ fn main() {
             Cmd::ShellExec { command, shell, cwd, timeout_ms } => {
                 cmd_phase4::shell_exec(&identity.path, command, shell.as_deref(), cwd, timeout_ms).await
             }
-            Cmd::LaunchApp { query } => cmd_phase4::launch_app(&identity.path, query).await,
+            Cmd::LaunchApp { query, focus } => cmd_phase4::launch_app(&identity.path, query, focus).await,
             Cmd::ListProcesses { name, visible_only } => {
                 let v = if visible_only { Some(true) } else { None };
                 cmd_phase4::list_processes(&identity.path, name, v).await

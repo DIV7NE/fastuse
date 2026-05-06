@@ -323,9 +323,30 @@ pub fn capture_into_staging(
             *cell.borrow_mut() = Some(s);
         }
 
-        let mut borrow = cell.borrow_mut();
-        let state: &mut CaptureState = borrow.as_mut().expect("state init guarded above");
-        capture_one(state, monitor, region)
+        // First attempt — borrow released at end of block.
+        let result = {
+            let mut borrow = cell.borrow_mut();
+            let state = borrow.as_mut().expect("state init guarded above");
+            capture_one(state, monitor, region.clone())
+        };
+
+        // On Internal error the D3D11 device may have been removed (GPU reset,
+        // driver crash, display-mode change that DXGI_ERROR_DEVICE_REMOVED
+        // propagates through DuplicateOutput inside reacquire). The broken
+        // CaptureState must be discarded entirely — reacquire alone cannot
+        // recover a lost device. Drop STATE and rebuild once from scratch.
+        let needs_device_rebuild = matches!(&result, Err(e) if e.code == ErrorCode::Internal);
+        if needs_device_rebuild {
+            tracing::warn!("DXGI Internal error; dropping CaptureState and rebuilding device");
+            *cell.borrow_mut() = None;
+            let s = CaptureState::new()?;
+            *cell.borrow_mut() = Some(s);
+            let mut borrow = cell.borrow_mut();
+            let state = borrow.as_mut().expect("just initialized");
+            return capture_one(state, monitor, region);
+        }
+
+        result
     })
 }
 
