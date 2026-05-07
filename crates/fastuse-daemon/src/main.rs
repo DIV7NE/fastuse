@@ -243,4 +243,15 @@ fn main() {
         tracing::error!(error = %e, "server exited with error");
     }
     tracing::info!("daemon shutting down");
+
+    // SH-01: explicit Request::Shutdown path leaves an in-flight I/O on the
+    // pipe that tokio's Runtime::Drop can't cancel — Drop hangs forever,
+    // process never exits, singleton mutex stays held, next CLI call blocks.
+    // shutdown_background() returns immediately and lets the OS reclaim
+    // worker threads. Idle-timeout path was unaffected (no live connection
+    // when shutdown fires) which is why the bug only surfaced on `stop`.
+    rt.shutdown_background();
+    drop(capture);
+    drop(uia);
+    drop(input);
 }
