@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0 — 2026-05-10
+
+### Added
+- `fastuse-cli type --rate <ms>` — fixed inter-character delay. Each char is
+  sent as its own SendInput followed by `rate_ms` sleep. Default (unset) is
+  unchanged "as fast as possible" bulk path. Defeats apps that debounce or
+  drop keystrokes when the input queue floods (ImGui text inputs, some
+  terminal widgets).
+- `fastuse-cli wait-for-idle [--hwnd N] [--timeout-ms 1000]` — block until
+  the target window's input queue drains via `SendMessageTimeout(WM_NULL,
+  SMTO_BLOCK)`. Plus a one-frame paint settle on success. Use between a
+  `click` and a follow-up `type` when the app debounces or when an
+  ImGui-style nav focus shift needs a frame to settle.
+- `Request::TypeRated`, `Request::WaitForIdle`, `Response::Idle` wire
+  variants (appended; existing variant indices unchanged).
+
 ## 2.1.0 — 2026-05-10
 
 ### Changed (behaviour)

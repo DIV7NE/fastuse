@@ -69,6 +69,11 @@ enum Cmd {
     Type {
         /// Text to type. Wrapped in Redact<> end-to-end (D-10).
         text: String,
+        /// Fixed inter-character delay in milliseconds. When set, each char is
+        /// emitted as its own SendInput followed by the given sleep. Default
+        /// (unset) is the bulk "as fast as possible" path.
+        #[arg(long)]
+        rate: Option<u32>,
         #[command(flatten)]
         opts: ActionOptsArgs,
     },
@@ -183,6 +188,19 @@ enum Cmd {
         hwnd: String,
         #[command(flatten)]
         opts: ActionOptsArgs,
+    },
+    /// Block until the target window's input queue drains. Use between a
+    /// `click` and a follow-up `type` when the app debounces or when an
+    /// ImGui-style focus shift needs a frame to settle. Returns whether the
+    /// drain ping was acknowledged before the timeout.
+    WaitForIdle {
+        /// HWND as decimal or 0x-prefixed hex. If unset, the foreground
+        /// window is used.
+        #[arg(long)]
+        hwnd: Option<String>,
+        /// Wait budget in milliseconds.
+        #[arg(long, default_value_t = 1000)]
+        timeout_ms: u32,
     },
     /// Wait for a window matching title/process to appear (polls up to --timeout-ms).
     WaitForWindow {
@@ -682,9 +700,12 @@ fn main() {
                 let opts = build_action_opts(opts)?;
                 cmd_phase2::click(&identity.path, x, y, &button, count, mods.as_deref(), no_cursor, opts).await
             }
-            Cmd::Type { text, opts } => {
+            Cmd::Type { text, rate, opts } => {
                 let opts = build_action_opts(opts)?;
-                cmd_phase2::r#type(&identity.path, text, opts).await
+                match rate {
+                    Some(rate_ms) => cmd_phase2::type_rated(&identity.path, text, rate_ms, opts).await,
+                    None => cmd_phase2::r#type(&identity.path, text, opts).await,
+                }
             }
             Cmd::Key { chord, repeat, opts } => {
                 let opts = build_action_opts(opts)?;
@@ -724,6 +745,13 @@ fn main() {
                 let h = parse_hwnd(&hwnd)?;
                 let opts = build_action_opts(opts)?;
                 cmd_phase2::focus_window(&identity.path, h, opts).await
+            }
+            Cmd::WaitForIdle { hwnd, timeout_ms } => {
+                let hwnd = match hwnd {
+                    Some(s) => Some(parse_hwnd(&s)?),
+                    None => None,
+                };
+                cmd_phase2::wait_for_idle(&identity.path, hwnd, timeout_ms).await
             }
             Cmd::WaitForWindow { title, process, timeout_ms } => {
                 use fastuse_proto::{wire::WaitForWindowRequest, Request as Req, Response};

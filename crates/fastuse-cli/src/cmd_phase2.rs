@@ -152,6 +152,53 @@ pub async fn r#type(pipe_path: &str, text: String, opts: Option<ActionOpts>) -> 
     print_action_or_ack(one_call(pipe_path, req).await?)
 }
 
+pub async fn type_rated(
+    pipe_path: &str,
+    text: String,
+    rate_ms: u32,
+    opts: Option<ActionOpts>,
+) -> anyhow::Result<()> {
+    let req = Request::TypeRated {
+        text: Redact::new(text),
+        rate_ms,
+        opts,
+    };
+    print_action_or_ack(one_call(pipe_path, req).await?)
+}
+
+pub async fn wait_for_idle(
+    pipe_path: &str,
+    hwnd: Option<u64>,
+    timeout_ms: u32,
+) -> anyhow::Result<()> {
+    use serde_json::json;
+    let req = Request::WaitForIdle { hwnd, timeout_ms };
+    match one_call(pipe_path, req).await? {
+        Response::Idle { waited_ms, paint_observed } => {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "waited_ms": waited_ms,
+                    "paint_observed": paint_observed,
+                })
+            );
+            Ok(())
+        }
+        Response::Error(e) => {
+            println!(
+                "{}",
+                json!({"ok": false, "error": e.code.as_str(), "message": e.message, "hint": e.hint})
+            );
+            anyhow::bail!("{}", e.code.as_str())
+        }
+        other => {
+            println!("{}", json!({"unexpected": format!("{other:?}")}));
+            Ok(())
+        }
+    }
+}
+
 pub async fn key(pipe_path: &str, chord: String, repeat: u32, opts: Option<ActionOpts>) -> anyhow::Result<()> {
     // Early-fail on InvalidChord (CONTEXT.md: shared parser).
     let _ = fastuse_proto::parse_chord(&chord)

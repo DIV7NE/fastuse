@@ -185,6 +185,38 @@ pub fn type_text(text: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
+/// `type(text)` with a fixed inter-character delay. Each `char` is sent as
+/// its own SendInput pair (DOWN+UP `KEYEVENTF_UNICODE`) followed by a sleep
+/// of `rate_ms` milliseconds before the next char. Defeats apps that
+/// debounce or drop keystrokes when the input event queue floods (some
+/// ImGui text inputs, terminal widgets that throttle, etc.).
+///
+/// `rate_ms == 0` is permitted and behaves like the bulk path but still
+/// emits per-char syscalls (no benefit; callers should use [`type_text`]
+/// for the unrestricted-rate case).
+pub fn type_text_rated(text: &str, rate_ms: u32) -> Result<(), ProtoError> {
+    check_foreground_integrity()?;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Ok(());
+    }
+    let delay = std::time::Duration::from_millis(rate_ms as u64);
+    let last = chars.len() - 1;
+    for (idx, ch) in chars.iter().enumerate() {
+        let mut s = [0u8; 4];
+        let events = key_unicode_str(ch.encode_utf8(&mut s));
+        if !events.is_empty() {
+            for chunk in events.chunks(256) {
+                send(chunk).map_err(ProtoError::from)?;
+            }
+        }
+        if rate_ms > 0 && idx != last {
+            std::thread::sleep(delay);
+        }
+    }
+    Ok(())
+}
+
 /// `key(chord, repeat)`.
 pub fn key(chord_str: &str, repeat: u32) -> Result<(), ProtoError> {
     check_foreground_integrity()?;

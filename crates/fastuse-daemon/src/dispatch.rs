@@ -359,6 +359,26 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 r.unwrap_or_else(Response::Error)
             }
         },
+        Request::TypeRated { text, rate_ms, opts } => {
+            let payload = text.into_inner();
+            tracing::debug!(text_len = payload.len(), rate_ms, "type_rated tool dispatch");
+            let inner = run_unit(ctx, &mut win32_us, move || {
+                ih::type_text_rated(&payload, rate_ms)
+            });
+            finalize(inner, opts, ctx)
+        }
+        Request::WaitForIdle { hwnd, timeout_ms } => {
+            let w_start = Instant::now();
+            let r = fastuse_win::window::wait_for_idle::wait_for_idle(hwnd, timeout_ms);
+            win32_us = w_start.elapsed().as_micros() as i64;
+            match r {
+                Ok(r) => Response::Idle {
+                    waited_ms: r.waited_ms,
+                    paint_observed: r.paint_observed,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::ScreenshotWindow { hwnd, format } => match ctx.capture.as_ref() {
             None => Response::Error(Error::new(
                 ErrorCode::Internal,

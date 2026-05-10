@@ -351,6 +351,30 @@ pub enum Request {
         /// Output image format (default JPEG q=85).
         format: Option<ImageFormat>,
     },
+
+    // --- v2.2.0: rate-controlled type + idle wait ---
+    /// Type text with a fixed inter-character delay. Each `char` is sent as
+    /// its own SendInput pair followed by a `rate_ms` sleep. Use when the
+    /// target app debounces or drops keystrokes under the unrestricted-rate
+    /// `Type` path.
+    TypeRated {
+        /// Unicode payload to type (Redact-wrapped per D-10).
+        text: Redact<String>,
+        /// Milliseconds to sleep between consecutive characters.
+        rate_ms: u32,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
+    /// Block until the foreground (or `hwnd`) window's input queue drains.
+    /// Use between a `Click` and a follow-up `Type` when the target app
+    /// debounces or when an ImGui-style focus shift needs a frame to settle.
+    WaitForIdle {
+        /// Optional explicit target HWND (default foreground).
+        hwnd: Option<u64>,
+        /// Total wait budget in milliseconds (caller cap on the SendMessage
+        /// drain).
+        timeout_ms: u32,
+    },
 }
 
 /// Clipboard format selector.
@@ -759,6 +783,16 @@ pub enum Response {
         monitor_offset_y: i32,
         /// Effective DPI scale of the target window (`GetDpiForWindow / 96`).
         dpi_scale: f32,
+    },
+
+    // --- v2.2.0: idle wait ---
+    /// Result of `WaitForIdle`.
+    Idle {
+        /// Wall-clock time spent waiting (milliseconds).
+        waited_ms: u32,
+        /// `true` if the target window acknowledged the drain ping;
+        /// `false` if `timeout_ms` elapsed first.
+        paint_observed: bool,
     },
 }
 

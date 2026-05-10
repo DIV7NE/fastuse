@@ -8,6 +8,7 @@ pub mod foreground;
 pub mod list_windows;
 pub mod monitors;
 pub mod move_resize;
+pub mod wait_for_idle;
 pub mod wait_for_window;
 
 use windows::core::PWSTR;
