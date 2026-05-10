@@ -44,15 +44,22 @@ pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClien
     // for the final error hint.
     let stale_sentinel_evicted = try_evict_dead_sentinel();
 
-    // Spawn + backoff. UAC fires here on first call after reboot.
-    if let Some(c) = try_spawn_and_connect(pipe_path).await {
+    // When `install-autostart` was run, a pre-authorised Scheduled Task can
+    // launch the daemon elevated without a UAC prompt. Prefer that path —
+    // both for cold start (task may have been ended manually) and for
+    // recovery after a zombie kill below. `via_schtasks` is set once at the
+    // top of this call and reused for the second spawn round so a single
+    // call never mixes UAC and schtasks paths.
+    let via_schtasks = scheduled_task_installed();
+
+    if let Some(c) = try_spawn_and_connect(pipe_path, via_schtasks).await {
         return Ok(c);
     }
 
     // Spawn round failed. Suspect a zombie holding the singleton mutex.
     let zombie_killed = evict_live_zombie();
     if zombie_killed {
-        if let Some(c) = try_spawn_and_connect(pipe_path).await {
+        if let Some(c) = try_spawn_and_connect(pipe_path, via_schtasks).await {
             return Ok(c);
         }
     }
@@ -71,14 +78,19 @@ pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClien
         format!("daemon pipe {pipe_path} did not appear after auto-spawn backoff"),
     )
     .with_hint(format!(
-        "stale_sentinel_evicted={stale_sentinel_evicted} zombie_killed={zombie_killed} \
-         last_pipe_error={last_pipe_err}"
+        "via_schtasks={via_schtasks} stale_sentinel_evicted={stale_sentinel_evicted} \
+         zombie_killed={zombie_killed} last_pipe_error={last_pipe_err}"
     ));
     Err(std::io::Error::new(std::io::ErrorKind::TimedOut, err))
 }
 
-async fn try_spawn_and_connect(pipe_path: &str) -> Option<NamedPipeClient> {
-    if spawn_daemon_detached().is_err() {
+async fn try_spawn_and_connect(pipe_path: &str, via_schtasks: bool) -> Option<NamedPipeClient> {
+    let spawned = if via_schtasks {
+        spawn_via_schtasks().is_ok()
+    } else {
+        spawn_daemon_detached().is_ok()
+    };
+    if !spawned {
         return None;
     }
     for ms in [50u64, 100, 200, 400, 800, 800] {
@@ -88,6 +100,60 @@ async fn try_spawn_and_connect(pipe_path: &str) -> Option<NamedPipeClient> {
         }
     }
     None
+}
+
+/// Name of the Scheduled Task registered by `fastuse-cli install-autostart`.
+/// Must match `cmd_autostart::TASK_NAME` exactly.
+const AUTOSTART_TASK_NAME: &str = "fastuse-daemon";
+
+/// Return `true` when the `install-autostart` Scheduled Task is registered.
+/// Detected by `schtasks /Query /TN <name>` exit code (0 = present).
+///
+/// Fast: ~30ms cold, <10ms warm. Called once per `connect_or_spawn` so the
+/// extra cost is amortised against the seconds-long UAC fallback it avoids.
+fn scheduled_task_installed() -> bool {
+    let out = std::process::Command::new("schtasks")
+        .args([
+            "/Query",
+            "/TN",
+            AUTOSTART_TASK_NAME,
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    matches!(out, Ok(s) if s.success())
+}
+
+/// Trigger the pre-authorised Scheduled Task. No UAC fires because the task
+/// was registered `/RL HIGHEST` at install time, which records the elevation
+/// grant.
+///
+/// Resilient to "task already running" — `schtasks /Run` returns success in
+/// that case but doesn't actually re-launch. The retry loop in
+/// [`try_spawn_and_connect`] still tries to open the pipe; if it's still
+/// dead the next call up the chain runs `evict_live_zombie` which uses
+/// taskkill on the recorded PID, after which a follow-up `schtasks /Run`
+/// brings up a fresh process.
+fn spawn_via_schtasks() -> std::io::Result<()> {
+    let status = std::process::Command::new("schtasks")
+        .args(["/Run", "/TN", AUTOSTART_TASK_NAME])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "schtasks /Run /TN {AUTOSTART_TASK_NAME} failed: exit={:?}",
+                status.code()
+            ),
+        ))
+    }
 }
 
 /// Pre-spawn sweep: read the sentinel, and if the recorded PID is not a

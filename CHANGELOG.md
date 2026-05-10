@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.1 — 2026-05-11
+
+### Fixed
+- Daemon auto-recovery no longer fires UAC when the `install-autostart`
+  Scheduled Task is registered. `connect_or_spawn` now detects the
+  pre-authorised task via `schtasks /Query` and triggers it via
+  `schtasks /Run` instead of `ShellExecuteExW("runas")`. Survives zombie
+  kill + respawn round without prompting. Falls back to the original
+  `runas` path when no task is installed.
+- `DaemonSpawnFailed` hint now reports `via_schtasks=true|false` so callers
+  can tell which spawn path was attempted.
+
 ## 2.3.0 — 2026-05-10
 
 ### Changed (behaviour)
