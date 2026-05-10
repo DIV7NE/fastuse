@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.2 — 2026-05-10
+
+### Fixed
+- Daemon auto-recovery on stale pipe. `connect_or_spawn` now sweeps dead
+  sentinels (`daemon.pid` pointing at a non-fastuse-daemon PID) *before*
+  invoking the UAC spawn, eliminating the manual
+  `taskkill /F /IM fastuse-daemon.exe` + sentinel-deletion recipe after a
+  daemon crash or upgrade. Live-zombie eviction still runs as a fallback
+  after spawn failure.
+- `DaemonSpawnFailed` error hint now reports what was tried
+  (`stale_sentinel_evicted`, `zombie_killed`, `last_pipe_error`) so callers
+  can distinguish UAC decline from a stuck spawn.
+
 ## 2.0.1 — 2026-05-10
 
 ### Added
