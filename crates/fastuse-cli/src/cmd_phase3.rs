@@ -260,8 +260,9 @@ pub async fn click_element(
     focus_first: Option<u64>,
     button: &str,
     count: u8,
+    pick_first: bool,
 ) -> anyhow::Result<()> {
-    use fastuse_proto::MouseButton;
+    use fastuse_proto::{ErrorCode, MouseButton};
     let selector = parse_selector(selector_json)?;
 
     // Step 1: UIA query
@@ -269,9 +270,17 @@ pub async fn click_element(
     let matches = match one_call(pipe_path, q_req).await? {
         Response::UiaQuery { matches, degraded } => {
             if degraded && matches.is_empty() {
-                anyhow::bail!(
-                    "UIA returned degraded with no matches for selector — try vision (screenshot + computer left-click) on this app"
+                // Distinct from NoElementMatched — UIA itself couldn't see the
+                // tree. Emit a typed error so callers can branch on it.
+                println!(
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "error": ErrorCode::UiaDegraded.as_str(),
+                        "hint": "UIA returned degraded with no matches — use vision (screenshot + computer left-click) on this app",
+                    })
                 );
+                anyhow::bail!("UIA_DEGRADED");
             }
             matches
         }
@@ -282,9 +291,33 @@ pub async fn click_element(
             anyhow::bail!("unexpected uia-query response: {other:?}");
         }
     };
-    let first = matches.into_iter().next().ok_or_else(|| {
-        anyhow::anyhow!("no element matched selector — element may not exist or UIA tree may be incomplete")
-    })?;
+    // Zero matches → NoElementMatched (typed).
+    if matches.is_empty() {
+        println!(
+            "{}",
+            json!({
+                "ok": false,
+                "error": ErrorCode::NoElementMatched.as_str(),
+                "hint": "selector resolved to zero elements — consider vision (screenshot + computer left-click)",
+            })
+        );
+        anyhow::bail!("NO_ELEMENT_MATCHED");
+    }
+    // Multiple matches without `--first` → AmbiguousMatch (typed).
+    if matches.len() > 1 && !pick_first {
+        let n = matches.len();
+        println!(
+            "{}",
+            json!({
+                "ok": false,
+                "error": ErrorCode::AmbiguousMatch.as_str(),
+                "matches": n,
+                "hint": "pass --first to click the first match, or tighten the selector",
+            })
+        );
+        anyhow::bail!("AMBIGUOUS_MATCH");
+    }
+    let first = matches.into_iter().next().expect("non-empty checked above");
     let r = first.bounding_rect;
     if r.w <= 0 || r.h <= 0 {
         anyhow::bail!(

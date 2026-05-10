@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.0 — 2026-05-10
+
+### Changed (behaviour)
+- `click-element` now returns structured JSON errors instead of free-form
+  anyhow messages:
+  - Zero matches → `{"ok":false,"error":"NO_ELEMENT_MATCHED",...}` (exit 1)
+  - Multiple matches without `--first` →
+    `{"ok":false,"error":"AMBIGUOUS_MATCH","matches":N,...}` (exit 1)
+  - UIA degraded with no matches → `{"ok":false,"error":"UIA_DEGRADED",...}`
+- Previously the first match was silently taken for multi-match selectors;
+  callers must now opt in with `--first` or tighten the selector.
+
+### Added
+- `--first` flag on `click-element` to opt into pick-first behaviour for
+  ambiguous selectors.
+- `ErrorCode::NoElementMatched` (`NO_ELEMENT_MATCHED`) and
+  `ErrorCode::AmbiguousMatch` (`AMBIGUOUS_MATCH`) — appended; existing
+  variants unchanged.
+
 ## 2.0.2 — 2026-05-10
 
 ### Fixed

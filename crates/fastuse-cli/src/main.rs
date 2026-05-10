@@ -316,6 +316,12 @@ enum Cmd {
         /// Number of clicks (1=single, 2=double, 3=triple).
         #[arg(long, default_value_t = 1)]
         count: u8,
+        /// When the selector matches multiple elements, click the first.
+        /// Without this flag, an AmbiguousMatch error is returned. Behaviour
+        /// change introduced in 2.1.0 — previously the first match was always
+        /// taken silently.
+        #[arg(long)]
+        first: bool,
     },
 
     // ----- Phase 4: clipboard / shell / launch / processes -----
@@ -817,6 +823,7 @@ fn main() {
                 focus_first,
                 button,
                 count,
+                first,
             } => {
                 let root = root_hwnd.map(|s| parse_hwnd(&s)).transpose()?;
                 let focus = focus_first.map(|s| parse_hwnd(&s)).transpose()?;
@@ -827,6 +834,7 @@ fn main() {
                     focus,
                     &button,
                     count,
+                    first,
                 )
                 .await
             }

@@ -62,6 +62,14 @@ pub enum ErrorCode {
     CaptureLost,
     /// JPEG/PNG/mtpng encoder rejected the frame (Phase 3 CAP-05).
     EncodeFailed,
+    /// `click-element`-style UIA selector resolved to zero matches and the
+    /// caller did not opt into vision fallback (v2.1.0). Distinct from
+    /// `ElementNotFound` to give callers a stable structured code at the CLI
+    /// boundary.
+    NoElementMatched,
+    /// UIA selector resolved to more than one match and the caller did not
+    /// pass `--first` (v2.1.0). Carries the match count in the message.
+    AmbiguousMatch,
 }
 
 impl ErrorCode {
@@ -91,6 +99,8 @@ impl ErrorCode {
             Self::ElementNotFound => "ELEMENT_NOT_FOUND",
             Self::CaptureLost => "CAPTURE_LOST",
             Self::EncodeFailed => "ENCODE_FAILED",
+            Self::NoElementMatched => "NO_ELEMENT_MATCHED",
+            Self::AmbiguousMatch => "AMBIGUOUS_MATCH",
         }
     }
 }
@@ -166,6 +176,8 @@ mod tests {
             ErrorCode::ElementNotFound,
             ErrorCode::CaptureLost,
             ErrorCode::EncodeFailed,
+            ErrorCode::NoElementMatched,
+            ErrorCode::AmbiguousMatch,
         ] {
             let err = Error::new(code, "test message");
             let bytes = encode_frame(&err).unwrap();
@@ -202,5 +214,7 @@ mod tests {
         assert_eq!(ErrorCode::ElementNotFound.as_str(), "ELEMENT_NOT_FOUND");
         assert_eq!(ErrorCode::CaptureLost.as_str(), "CAPTURE_LOST");
         assert_eq!(ErrorCode::EncodeFailed.as_str(), "ENCODE_FAILED");
+        assert_eq!(ErrorCode::NoElementMatched.as_str(), "NO_ELEMENT_MATCHED");
+        assert_eq!(ErrorCode::AmbiguousMatch.as_str(), "AMBIGUOUS_MATCH");
     }
 }
