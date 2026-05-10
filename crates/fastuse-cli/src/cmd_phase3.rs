@@ -83,6 +83,51 @@ pub async fn screenshot_region(
     handle_screenshot(one_call(pipe_path, req).await?, out)
 }
 
+pub async fn screenshot_window(
+    pipe_path: &str,
+    hwnd: u64,
+    format: Option<&str>,
+    out: Option<&Path>,
+) -> anyhow::Result<()> {
+    let req = Request::ScreenshotWindow {
+        hwnd,
+        format: Some(parse_format(format)),
+    };
+    match one_call(pipe_path, req).await? {
+        Response::ScreenshotWindow {
+            bytes,
+            mime,
+            client_w,
+            client_h,
+            monitor_offset_x,
+            monitor_offset_y,
+            dpi_scale,
+        } => {
+            let bytes = bytes.into_inner();
+            let mut envelope = json!({
+                "ok": true,
+                "mime": mime,
+                "window_size": {"w": client_w, "h": client_h},
+                "monitor_offset": {"x": monitor_offset_x, "y": monitor_offset_y},
+                "dpi_scale": dpi_scale,
+                "bytes": bytes.len(),
+            });
+            if let Some(p) = out {
+                std::fs::write(p, &bytes)?;
+                envelope["path"] = json!(p.to_string_lossy());
+            } else {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                envelope["data_b64"] = json!(b64);
+            }
+            println!("{}", envelope);
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 fn handle_screenshot(res: Response, out: Option<&Path>) -> anyhow::Result<()> {
     match res {
         Response::Screenshot {

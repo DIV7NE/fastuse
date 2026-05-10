@@ -33,7 +33,10 @@ use fastuse_proto::{
     coords::WindowInfo as ProtoWindowInfo, ClipboardSet, Error, ErrorCode, MonitorInfo,
     MouseButton, ProcessSelector, Request, Response, ScrollDirection,
 };
-use fastuse_win::capture::{handle_screenshot, handle_screenshot_region, handle_screenshot_v2, handle_zoom_v2};
+use fastuse_win::capture::{
+    handle_screenshot, handle_screenshot_region, handle_screenshot_v2, handle_screenshot_window,
+    handle_zoom_v2,
+};
 use fastuse_win::capture_thread::CaptureThreadHandle;
 use fastuse_win::input::handlers as ih;
 use fastuse_win::input_thread::{InputJob, InputThreadHandle};
@@ -352,6 +355,18 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 };
                 let w_start = Instant::now();
                 let r = handle_screenshot_region(capture, region, monitor, format);
+                win32_us = w_start.elapsed().as_micros() as i64;
+                r.unwrap_or_else(Response::Error)
+            }
+        },
+        Request::ScreenshotWindow { hwnd, format } => match ctx.capture.as_ref() {
+            None => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "capture thread unavailable".to_string(),
+            )),
+            Some(capture) => {
+                let w_start = Instant::now();
+                let r = handle_screenshot_window(capture, hwnd, format);
                 win32_us = w_start.elapsed().as_micros() as i64;
                 r.unwrap_or_else(Response::Error)
             }

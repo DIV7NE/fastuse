@@ -339,6 +339,18 @@ pub enum Request {
     Computer(ComputerRequest),
     /// Wait for a window matching title/process to appear (v2 shape).
     WaitForWindowV2(WaitForWindowRequest),
+
+    // --- v2.0.1: window-targeted capture ---
+    /// Screenshot a specific window's client area in virtual-desktop coords.
+    /// Returns the image plus the monitor offset and DPI scale so callers can
+    /// translate window-local pixel coordinates back to monitor-absolute coords
+    /// without an extra `list-windows`/`foreground-window` round-trip.
+    ScreenshotWindow {
+        /// Target window handle.
+        hwnd: u64,
+        /// Output image format (default JPEG q=85).
+        format: Option<ImageFormat>,
+    },
 }
 
 /// Clipboard format selector.
@@ -725,6 +737,29 @@ pub enum Response {
     // --- v2: computer action result (Task 9) ---
     /// Result of a `Computer` action dispatch.
     Computer(ComputerResult),
+
+    // --- v2.0.1: window-targeted capture ---
+    /// Result of `ScreenshotWindow`. Image bytes are the captured client-area
+    /// rectangle in virtual-desktop pixel coordinates. `monitor_offset_x` /
+    /// `monitor_offset_y` is the top-left of the captured rect in
+    /// virtual-desktop coords — add window-local pixel offsets back to it to
+    /// recover monitor-absolute click coordinates.
+    ScreenshotWindow {
+        /// Encoded JPEG or PNG bytes; MCP edge re-encodes to base64.
+        bytes: Redact<Vec<u8>>,
+        /// MIME type (`image/jpeg` or `image/png`).
+        mime: String,
+        /// Client-area width in physical pixels.
+        client_w: u32,
+        /// Client-area height in physical pixels.
+        client_h: u32,
+        /// Top-left x of the captured client rect in virtual-desktop coords.
+        monitor_offset_x: i32,
+        /// Top-left y of the captured client rect in virtual-desktop coords.
+        monitor_offset_y: i32,
+        /// Effective DPI scale of the target window (`GetDpiForWindow / 96`).
+        dpi_scale: f32,
+    },
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in

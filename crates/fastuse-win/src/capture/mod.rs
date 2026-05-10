@@ -24,6 +24,6 @@ pub mod screenshot;
 pub use dxgi::{capture_into_staging, force_lose_for_test, FrameBuf};
 pub use encode::{encode, encode_jpeg_rgba, EncodedImage};
 pub use screenshot::{
-    handle_screenshot, handle_screenshot_region, handle_screenshot_v2, handle_zoom_v2,
-    ScreenshotV2Raw,
+    handle_screenshot, handle_screenshot_region, handle_screenshot_v2, handle_screenshot_window,
+    handle_zoom_v2, ScreenshotV2Raw,
 };

@@ -101,6 +101,117 @@ struct ScreenshotRaw {
     height: u32,
 }
 
+/// Window-targeted screenshot. Captures the client area of `hwnd` in
+/// virtual-desktop coords and returns image bytes + the monitor offset and
+/// DPI scale needed to translate window-local pixel offsets back to
+/// monitor-absolute coordinates.
+///
+/// Uses `GetClientRect` + `ClientToScreen` to compute the rect (so we do not
+/// capture the title bar / borders), `GetDpiForWindow` for the DPI scale, and
+/// `MonitorFromWindow` to pick the duplication object that contains the rect.
+/// Capture itself reuses `capture_into_staging` — same cached duplication
+/// surface as `screenshot-region`.
+pub fn handle_screenshot_window(
+    handle: &CaptureThreadHandle,
+    hwnd: u64,
+    format: Option<ImageFormat>,
+) -> Result<Response, ProtoError> {
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsWindow};
+
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // SAFETY: IsWindow accepts any HWND, returns false on stale.
+    if !unsafe { IsWindow(Some(h)) }.as_bool() {
+        return Err(ProtoError::new(
+            ErrorCode::WindowNotFound,
+            format!("HWND {hwnd:#x} is not a live window"),
+        ));
+    }
+
+    let mut rect = RECT::default();
+    // SAFETY: out-pointer; HWND is live.
+    if unsafe { GetClientRect(h, &mut rect) }.is_err() {
+        return Err(ProtoError::new(
+            ErrorCode::Internal,
+            format!("GetClientRect failed for HWND {hwnd:#x}"),
+        ));
+    }
+    let mut origin = POINT { x: 0, y: 0 };
+    // SAFETY: ClientToScreen mutates point in place; HWND live.
+    if !unsafe { ClientToScreen(h, &mut origin) }.as_bool() {
+        return Err(ProtoError::new(
+            ErrorCode::Internal,
+            format!("ClientToScreen failed for HWND {hwnd:#x}"),
+        ));
+    }
+    let client_w = (rect.right - rect.left).max(0) as u32;
+    let client_h = (rect.bottom - rect.top).max(0) as u32;
+    if client_w == 0 || client_h == 0 {
+        return Err(ProtoError::new(
+            ErrorCode::Internal,
+            format!(
+                "HWND {hwnd:#x} client area has zero dimensions ({client_w}x{client_h}) — \
+                 window may be minimized"
+            ),
+        ));
+    }
+    // SAFETY: GetDpiForWindow accepts any HWND; returns 0 on failure.
+    let dpi = unsafe { GetDpiForWindow(h) };
+    let dpi_scale = if dpi == 0 { 1.0_f32 } else { (dpi as f32) / 96.0 };
+
+    // Locate the monitor that contains the window — look up the matching
+    // index in the cached monitor list so `capture_into_staging` reuses the
+    // existing duplication object.
+    // SAFETY: MonitorFromWindow accepts any HWND.
+    let hmon: HMONITOR = unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) };
+    let monitors = list_monitors()?;
+    let mon_idx = monitors
+        .iter()
+        .position(|m| m.id == hmon.0 as u64)
+        .unwrap_or(0) as u32;
+
+    let region = Rect {
+        x: origin.x,
+        y: origin.y,
+        w: client_w as i32,
+        h: client_h as i32,
+    };
+    let fmt = format.unwrap_or_default();
+    let raw: ScreenshotRaw = handle.run(move || {
+        let buf: FrameBuf = capture_into_staging(mon_idx, Some(region.clone()))?;
+        let img = encode(&buf, fmt)?;
+        Ok(ScreenshotRaw {
+            bytes: img.bytes,
+            mime: img.mime.to_string(),
+            width: buf.w,
+            height: buf.h,
+        })
+    })?;
+    tracing::debug!(
+        hwnd = format_args!("{hwnd:#x}"),
+        width = raw.width,
+        height = raw.height,
+        mime = %raw.mime,
+        bytes_len = raw.bytes.len(),
+        dpi_scale,
+        "screenshot_window ok"
+    );
+    Ok(Response::ScreenshotWindow {
+        bytes: Redact::new(raw.bytes),
+        mime: raw.mime,
+        client_w: raw.width,
+        client_h: raw.height,
+        monitor_offset_x: origin.x,
+        monitor_offset_y: origin.y,
+        dpi_scale,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // v2 vision-first helpers (Task 10)
 // ---------------------------------------------------------------------------

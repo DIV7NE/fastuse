@@ -225,6 +225,20 @@ enum Cmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Capture a specific window's client area. Returns the image plus the
+    /// monitor offset and DPI scale so window-local pixel coords can be
+    /// translated back to monitor-absolute coords without a separate
+    /// `list-windows` / `foreground-window` round-trip.
+    ScreenshotWindow {
+        /// HWND as decimal or 0x-prefixed hex.
+        hwnd: String,
+        /// jpeg (default) or png.
+        #[arg(long)]
+        format: Option<String>,
+        /// Write encoded bytes to this file (raw, NOT base64).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Take a sub-rectangle screenshot (reuses cached duplication object).
     ScreenshotRegion {
         /// Top-left x in physical pixels.
@@ -742,6 +756,16 @@ fn main() {
                 cmd_phase3::screenshot(
                     &identity.path,
                     monitor,
+                    format.as_deref(),
+                    out.as_deref(),
+                )
+                .await
+            }
+            Cmd::ScreenshotWindow { hwnd, format, out } => {
+                let h = parse_hwnd(&hwnd)?;
+                cmd_phase3::screenshot_window(
+                    &identity.path,
+                    h,
                     format.as_deref(),
                     out.as_deref(),
                 )

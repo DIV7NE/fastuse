@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.1 — 2026-05-10
+
+### Added
+- `fastuse-cli screenshot-window <HWND>` — capture a specific window's client
+  area. Returns the image plus `monitor_offset` and `dpi_scale` so window-local
+  pixel coordinates can be translated to monitor-absolute coords without a
+  separate `list-windows` / `foreground-window` round-trip. Reuses the cached
+  duplication object — no extra capture surface created.
+- `Request::ScreenshotWindow` / `Response::ScreenshotWindow` wire variants
+  (appended; existing variant indices unchanged).
+
 ## 2.0.0 — 2026-05-05
 
 Vision-first computer-use rebuild. Targeting layer (UIA+OCR) deleted; primary
