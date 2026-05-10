@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.0 — 2026-05-10
+
+### Changed (behaviour)
+- `inspect-at` now returns a `pixel_only` envelope when UIA cannot resolve
+  an element at the probe but a window *does* exist there (typical of
+  custom-rendered ImGui / Direct2D regions). Previously the call surfaced a
+  bare `ElementNotFound`, which forced callers to do a follow-up
+  `foreground-window` to learn what they were probably looking at.
+- New shape on success: `{"ok":true,"pixel_only":false,...}` for UIA-resolved
+  elements; `{"ok":true,"pixel_only":true,"hwnd":N,"window_title":"...",
+  "process_name":"..."}` for custom-rendered regions.
+
+### Added
+- `Response::InspectPixelOnly` wire variant (appended; existing variant
+  indices unchanged).
+
 ## 2.2.0 — 2026-05-10
 
 ### Added

@@ -224,7 +224,26 @@ pub async fn inspect_at_point(pipe_path: &str, x: i32, y: i32) -> anyhow::Result
         Response::Inspect { node, degraded } => {
             println!(
                 "{}",
-                json!({"ok": true, "degraded": degraded, "node": node})
+                json!({
+                    "ok": true,
+                    "pixel_only": false,
+                    "degraded": degraded,
+                    "node": node,
+                })
+            );
+            Ok(())
+        }
+        Response::InspectPixelOnly { hwnd, window_title, process_name } => {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "pixel_only": true,
+                    "hwnd": hwnd,
+                    "window_title": window_title,
+                    "process_name": process_name,
+                    "hint": "UIA could not resolve an element here — use vision (screenshot + computer left-click)",
+                })
             );
             Ok(())
         }

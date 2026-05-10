@@ -794,6 +794,21 @@ pub enum Response {
         /// `false` if `timeout_ms` elapsed first.
         paint_observed: bool,
     },
+
+    // --- v2.3.0: inspect-at pixel-only fallback ---
+    /// Returned by `InspectAtPoint` when the pixel lies inside a window but
+    /// UIA cannot resolve an element at that point (custom-rendered ImGui
+    /// region, Direct2D canvas, etc.). Callers should switch strategies to
+    /// vision (screenshot + click) — the fact that there *is* a window here
+    /// tells the caller which app to target.
+    InspectPixelOnly {
+        /// HWND that contains the probe point (`WindowFromPoint`).
+        hwnd: u64,
+        /// Top-level window title (best-effort, may be empty).
+        window_title: String,
+        /// Owning process basename (e.g. `tf2loader.exe`).
+        process_name: String,
+    },
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in
