@@ -791,8 +791,15 @@ pub enum Response {
         /// Wall-clock time spent waiting (milliseconds).
         waited_ms: u32,
         /// `true` if the target window acknowledged the drain ping;
-        /// `false` if `timeout_ms` elapsed first.
+        /// `false` if the pump-check phase timed out.
         paint_observed: bool,
+        /// `true` if the target HWND (or a descendant) holds keyboard focus
+        /// on its owning GUI thread by the time the call returns. `false`
+        /// means the focus-settle phase timed out; typing is still likely
+        /// to race. `#[serde(default)]` for forward-compat with older
+        /// daemons that didn't emit this field.
+        #[serde(default)]
+        focus_settled: bool,
     },
 
     // --- v2.3.0: inspect-at pixel-only fallback ---

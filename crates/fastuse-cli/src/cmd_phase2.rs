@@ -174,13 +174,14 @@ pub async fn wait_for_idle(
     use serde_json::json;
     let req = Request::WaitForIdle { hwnd, timeout_ms };
     match one_call(pipe_path, req).await? {
-        Response::Idle { waited_ms, paint_observed } => {
+        Response::Idle { waited_ms, paint_observed, focus_settled } => {
             println!(
                 "{}",
                 json!({
                     "ok": true,
                     "waited_ms": waited_ms,
                     "paint_observed": paint_observed,
+                    "focus_settled": focus_settled,
                 })
             );
             Ok(())

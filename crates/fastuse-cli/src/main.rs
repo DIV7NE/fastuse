@@ -71,7 +71,9 @@ enum Cmd {
         text: String,
         /// Fixed inter-character delay in milliseconds. When set, each char is
         /// emitted as its own SendInput followed by the given sleep. Default
-        /// (unset) is the bulk "as fast as possible" path.
+        /// (unset) is the bulk "as fast as possible" path. For Modern Notepad
+        /// / WinUI / RichEditD2DPT controls, use `--rate 30` or higher to
+        /// defeat the SendInput overrun race.
         #[arg(long)]
         rate: Option<u32>,
         #[command(flatten)]

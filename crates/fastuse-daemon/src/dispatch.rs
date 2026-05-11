@@ -375,6 +375,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 Ok(r) => Response::Idle {
                     waited_ms: r.waited_ms,
                     paint_observed: r.paint_observed,
+                    focus_settled: r.focus_settled,
                 },
                 Err(e) => Response::Error(e),
             }
