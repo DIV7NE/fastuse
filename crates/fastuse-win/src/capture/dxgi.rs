@@ -28,7 +28,7 @@
 //! atomic counter exposes this for the verification gates / tests.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fastuse_proto::{coords::Rect, Error as ProtoError, ErrorCode};
 use windows::core::Interface;
@@ -54,6 +54,22 @@ use windows::Win32::Graphics::Dxgi::{
 /// `DXGI_ERROR_ACCESS_LOST`). Steady-state must read 1 per monitor over a
 /// 50-shot capture loop (CAP-01 verification gate).
 pub static ACQUIRE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Cross-thread signal that the display configuration has changed (resolution,
+/// monitor add/remove, DPI). Set from the input thread's `WM_DISPLAYCHANGE`
+/// handler; consumed by the capture thread on its next `capture_into_staging`
+/// call, which drops cached `STATE` so the next capture rebuilds from scratch.
+///
+/// Lock-free, no message passing. `STATE` is `thread_local!` on the capture
+/// thread; this flag is the only sanctioned cross-thread signal.
+pub static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Called from the input thread's `WM_DISPLAYCHANGE` handler. Cheap — sets an
+/// atomic flag. The capture thread observes the flag on its next capture and
+/// invalidates `STATE` from the correct thread.
+pub fn signal_display_changed() {
+    DISPLAY_CHANGED.store(true, Ordering::Release);
+}
 
 /// One captured frame: tight BGRA, no row-pitch padding, dimensions in
 /// physical pixels.
@@ -317,6 +333,19 @@ pub fn capture_into_staging(
     region: Option<Rect>,
 ) -> Result<FrameBuf, ProtoError> {
     STATE.with(|cell| {
+        // Honor pending display-change signal from the input thread. Drops
+        // cached state so the next capture rebuilds with current monitor
+        // bounds, DPI, and device topology. Compare-and-swap so we only act
+        // once per signal even under racing capture calls.
+        if DISPLAY_CHANGED
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && cell.borrow().is_some()
+        {
+            tracing::warn!("DXGI capture state invalidated on display change");
+            *cell.borrow_mut() = None;
+        }
+
         // Lazy init.
         if cell.borrow().is_none() {
             let s = CaptureState::new()?;

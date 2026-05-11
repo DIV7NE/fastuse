@@ -219,6 +219,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
         // the next list_monitors call re-enumerates with current bounds /
         // DPI. (Plan Task 8.)
         crate::window::monitors::invalidate_cache();
+        // Signal the capture thread to drop cached DXGI state on its next
+        // capture. Cross-thread atomic flag — STATE is thread-local on the
+        // capture thread, so we can't invalidate it from here directly.
+        crate::capture::dxgi::signal_display_changed();
     }
     // SAFETY: DefWindowProcW is the Win32 fallback handler; always safe to call.
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }

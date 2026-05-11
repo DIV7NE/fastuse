@@ -17,11 +17,38 @@ use fastuse_proto::{
     coords::Rect, Error as ProtoError, ErrorCode, ImageFormat, Redact, Response,
 };
 
-use crate::capture::dxgi::{capture_into_staging, FrameBuf};
+use crate::capture::dxgi::{
+    capture_into_staging, invalidate_state_on_display_change, FrameBuf,
+};
 use crate::capture::encode::{encode, encode_jpeg_rgba};
 use crate::capture_thread::CaptureThreadHandle;
 use crate::scaling::{compute_ratio, scaled_dims, ScaleSnapshot};
 use crate::window::monitors::list_monitors;
+
+/// Outer-tier retry around `capture_into_staging`. The inner DXGI layer
+/// reacquires a single per-monitor duplication on `DXGI_ERROR_ACCESS_LOST`
+/// (one shot, per `dxgi::capture_one`). If that reacquire itself returns
+/// `CaptureLost`, the cached `CaptureState` is irrecoverable from the
+/// per-monitor path — drop it entirely and rebuild from scratch. Two-tier
+/// recovery: per-monitor → full-state-rebuild → propagate.
+///
+/// MUST be called on the capture thread.
+fn capture_with_outer_retry(
+    monitor: u32,
+    region: Option<Rect>,
+) -> Result<FrameBuf, ProtoError> {
+    match capture_into_staging(monitor, region.clone()) {
+        Ok(buf) => Ok(buf),
+        Err(e) if e.code == ErrorCode::CaptureLost => {
+            tracing::warn!(
+                "DXGI CaptureLost survived inner reacquire; dropping CaptureState and retrying"
+            );
+            invalidate_state_on_display_change();
+            capture_into_staging(monitor, region)
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// Full-monitor screenshot (CAP-01).
 pub fn handle_screenshot(
@@ -32,7 +59,7 @@ pub fn handle_screenshot(
     let mon = monitor.unwrap_or(0);
     let fmt = format.unwrap_or_default();
     let raw: ScreenshotRaw = handle.run(move || {
-        let buf = capture_into_staging(mon, None)?;
+        let buf = capture_with_outer_retry(mon, None)?;
         let img = encode(&buf, fmt)?;
         Ok(ScreenshotRaw {
             bytes: img.bytes,
@@ -67,7 +94,7 @@ pub fn handle_screenshot_region(
     let mon = monitor.unwrap_or(0);
     let fmt = format.unwrap_or_default();
     let raw: ScreenshotRaw = handle.run(move || {
-        let buf: FrameBuf = capture_into_staging(mon, Some(region.clone()))?;
+        let buf: FrameBuf = capture_with_outer_retry(mon, Some(region.clone()))?;
         let img = encode(&buf, fmt)?;
         Ok(ScreenshotRaw {
             bytes: img.bytes,
@@ -183,7 +210,7 @@ pub fn handle_screenshot_window(
     };
     let fmt = format.unwrap_or_default();
     let raw: ScreenshotRaw = handle.run(move || {
-        let buf: FrameBuf = capture_into_staging(mon_idx, Some(region.clone()))?;
+        let buf: FrameBuf = capture_with_outer_retry(mon_idx, Some(region.clone()))?;
         let img = encode(&buf, fmt)?;
         Ok(ScreenshotRaw {
             bytes: img.bytes,
@@ -270,7 +297,7 @@ pub fn handle_screenshot_v2(
     // Determine origin (virtual-desktop top-left) for the chosen monitor.
     let (mon_idx, origin_x, origin_y) = resolve_monitor_origin(monitor)?;
     handle.run(move || {
-        let buf = capture_into_staging(mon_idx, None)?;
+        let buf = capture_with_outer_retry(mon_idx, None)?;
         screenshot_v2_from_buf(&buf, origin_x, origin_y, target_max)
     })
 }
@@ -307,7 +334,7 @@ pub fn handle_zoom_v2(
     }
     let region = Rect { x: native_x, y: native_y, w: native_w, h: native_h };
     handle.run(move || {
-        let buf = capture_into_staging(0, Some(region))?;
+        let buf = capture_with_outer_retry(0, Some(region))?;
         screenshot_v2_from_buf(&buf, native_x, native_y, target_max)
     })
 }
