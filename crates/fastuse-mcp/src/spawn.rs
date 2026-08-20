@@ -15,15 +15,40 @@ use windows::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOW,
 };
 
+/// Win32 `ERROR_PIPE_BUSY`. The server exists but every instance is momentarily
+/// taken — a wait-and-retry condition, not a reason to spawn a second daemon.
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// Open the pipe, retrying briefly while the server reports "all instances
+/// busy". Any other error returns immediately so the caller still reaches the
+/// spawn path when the daemon is genuinely absent.
+async fn open_with_busy_retry(pipe_path: &str) -> std::io::Result<NamedPipeClient> {
+    let mut last = match ClientOptions::new().open(pipe_path) {
+        Ok(c) => return Ok(c),
+        Err(e) => e,
+    };
+    for ms in [1u64, 2, 5, 10, 25, 50, 100, 200, 400] {
+        if last.raw_os_error() != Some(ERROR_PIPE_BUSY) {
+            return Err(last);
+        }
+        sleep(Duration::from_millis(ms)).await;
+        match ClientOptions::new().open(pipe_path) {
+            Ok(c) => return Ok(c),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClient> {
-    if let Ok(c) = ClientOptions::new().open(pipe_path) {
+    if let Ok(c) = open_with_busy_retry(pipe_path).await {
         return Ok(c);
     }
     spawn_daemon_detached()?;
     let backoffs = [50u64, 100, 200, 400, 800, 800];
     for ms in backoffs {
         sleep(Duration::from_millis(ms)).await;
-        if let Ok(c) = ClientOptions::new().open(pipe_path) {
+        if let Ok(c) = open_with_busy_retry(pipe_path).await {
             return Ok(c);
         }
     }

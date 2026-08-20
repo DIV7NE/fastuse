@@ -33,9 +33,34 @@ use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 /// listing what was tried so callers can tell the difference between "UAC
 /// declined", "stale sentinel cleared but spawn still failed", and "zombie
 /// killed but spawn still failed".
+/// Win32 `ERROR_PIPE_BUSY`. The server exists but every instance is momentarily
+/// taken — a wait-and-retry condition, not a reason to spawn a second daemon.
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// Open the pipe, retrying briefly while the server reports "all instances
+/// busy". Any other error returns immediately so the caller still reaches the
+/// spawn path when the daemon is genuinely absent.
+async fn open_with_busy_retry(pipe_path: &str) -> std::io::Result<NamedPipeClient> {
+    let mut last = match ClientOptions::new().open(pipe_path) {
+        Ok(c) => return Ok(c),
+        Err(e) => e,
+    };
+    for ms in [1u64, 2, 5, 10, 25, 50, 100, 200, 400] {
+        if last.raw_os_error() != Some(ERROR_PIPE_BUSY) {
+            return Err(last);
+        }
+        sleep(Duration::from_millis(ms)).await;
+        match ClientOptions::new().open(pipe_path) {
+            Ok(c) => return Ok(c),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 pub async fn connect_or_spawn(pipe_path: &str) -> std::io::Result<NamedPipeClient> {
-    // Fast path.
-    if let Ok(c) = ClientOptions::new().open(pipe_path) {
+    // Fast path, tolerant of a momentarily saturated listener set.
+    if let Ok(c) = open_with_busy_retry(pipe_path).await {
         return Ok(c);
     }
 
@@ -95,7 +120,7 @@ async fn try_spawn_and_connect(pipe_path: &str, via_schtasks: bool) -> Option<Na
     }
     for ms in [50u64, 100, 200, 400, 800, 800] {
         sleep(Duration::from_millis(ms)).await;
-        if let Ok(c) = ClientOptions::new().open(pipe_path) {
+        if let Ok(c) = open_with_busy_retry(pipe_path).await {
             return Some(c);
         }
     }
@@ -350,5 +375,57 @@ mod tests {
         if let Some(bytes) = backup {
             let _ = std::fs::write(&path, bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod busy_retry_tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    /// A pipe name that exists but has no listener posted returns
+    /// ERROR_PIPE_BUSY — the exact gap a second agent session hits between the
+    /// daemon accepting one client and posting its replacement listener.
+    /// `open_with_busy_retry` must ride that out instead of reporting failure
+    /// (which would send the caller down the spawn/UAC path).
+    #[tokio::test]
+    async fn rides_out_a_momentarily_unlistened_pipe() {
+        let path = format!(r"\\.\pipe\fastuse-test-busy-{}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(2)
+            .create(&path)
+            .expect("create first instance");
+        let _hog = ClientOptions::new().open(&path).expect("first client connects");
+
+        // No listener is posted now: a plain open fails busy.
+        let err = ClientOptions::new().open(&path).expect_err("should be busy");
+        assert_eq!(err.raw_os_error(), Some(ERROR_PIPE_BUSY), "expected ERROR_PIPE_BUSY");
+
+        // Post a replacement shortly, as the daemon's accept loop now does.
+        let path2 = path.clone();
+        let posted = tokio::spawn(async move {
+            sleep(Duration::from_millis(40)).await;
+            let _next = ServerOptions::new()
+                .max_instances(2)
+                .create(&path2)
+                .expect("create replacement instance");
+            sleep(Duration::from_millis(500)).await;
+        });
+
+        open_with_busy_retry(&path).await.expect("retry should connect once a listener is posted");
+        drop(server);
+        posted.abort();
+    }
+
+    /// A genuinely absent daemon must fail fast rather than burn the retry
+    /// budget, so the caller still reaches the spawn path.
+    #[tokio::test]
+    async fn absent_pipe_fails_fast() {
+        let path = format!(r"\\.\pipe\fastuse-test-absent-{}", std::process::id());
+        let start = std::time::Instant::now();
+        let err = open_with_busy_retry(&path).await.expect_err("no such pipe");
+        assert_ne!(err.raw_os_error(), Some(ERROR_PIPE_BUSY));
+        assert!(start.elapsed() < Duration::from_millis(100), "should not retry: {:?}", start.elapsed());
     }
 }

@@ -50,29 +50,31 @@ pub async fn serve(
     // to keep accepting concurrent clients on the same name.
     let mut first = true;
 
+    // Keep a listener posted at all times. The replacement instance is created
+    // as soon as a client connects and *before* the accepted connection is
+    // handed to its task, so concurrent clients (several agent sessions at
+    // once) don't hit ERROR_PIPE_BUSY in the gap between accept and re-listen.
+    // SAFETY: sa_ptr returns a pointer to our owned SECURITY_ATTRIBUTES, which
+    // itself points at owned SD/DACL/SID buffers, all living as long as `sd`
+    // (this scope = function body).
+    let mut pending = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .max_instances(254)
+            .create_with_security_attributes_raw(&pipe_path, sa_ptr(&mut sd))
+    }?;
+    first = false;
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             tracing::info!("shutdown flag set; exiting accept loop");
             break;
         }
 
-        // Create a NamedPipeServer with our custom DACL.
-        // SAFETY: sa_ptr returns a pointer to our owned SECURITY_ATTRIBUTES,
-        // which itself points at owned SD/DACL/SID buffers. They live as long
-        // as `sd` (this scope = function body).
-        let server = unsafe {
-            ServerOptions::new()
-                .first_pipe_instance(first)
-                .max_instances(254)
-                .create_with_security_attributes_raw(&pipe_path, sa_ptr(&mut sd))
-        }?;
-        first = false;
-
-        // Wait for a client to connect.
+        // Wait for a client to connect on the posted listener.
         let connect_res = tokio::select! {
-            r = server.connect() => r,
+            r = pending.connect() => r,
             _ = wait_shutdown(Arc::clone(&shutdown)) => {
-                drop(server);
                 break;
             }
         };
@@ -80,6 +82,15 @@ pub async fn serve(
             tracing::warn!(error = %e, "pipe connect failed; retrying");
             continue;
         }
+
+        // Post the replacement listener before handling the accepted client.
+        let next = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(first)
+                .max_instances(254)
+                .create_with_security_attributes_raw(&pipe_path, sa_ptr(&mut sd))
+        }?;
+        let server = std::mem::replace(&mut pending, next);
 
         let clock = Arc::clone(&clock);
         let shutdown = Arc::clone(&shutdown);

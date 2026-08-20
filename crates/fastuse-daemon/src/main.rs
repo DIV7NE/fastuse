@@ -10,6 +10,12 @@
 //!   7. build tokio runtime
 //!   8. server::serve() (Task 7)
 
+// No console window. The daemon logs to stderr *and* a rolling file; when it
+// owns a console, a stray click puts that console in QuickEdit mark mode,
+// which blocks every stderr write and freezes the daemon while it still holds
+// the pipe name. Debug builds keep the console for development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod action_opts;
 mod dispatch;
 mod idle;
