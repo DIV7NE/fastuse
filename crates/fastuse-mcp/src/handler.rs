@@ -90,7 +90,7 @@ pub struct AckOutput {
 /// - `Ack`     — action completed, no post-action opts triggered.
 /// - `Element` — element-targeted action (matched=true/false).
 /// - `Screenshot` — action completed with screenshot_after (v2 transition).
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ActionOrAck {
     Ack(AckOutput),
@@ -98,11 +98,55 @@ pub enum ActionOrAck {
     Screenshot(ScreenshotOutput),
 }
 
+// Hand-written because the derive emits a bare `anyOf` with no root `type`,
+// which rmcp rejects: MCP requires every outputSchema to have root type
+// "object". Keep the union in `anyOf` and declare the root type alongside it.
+impl schemars::JsonSchema for ActionOrAck {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ActionOrAck".into()
+    }
+
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "anyOf": [
+                g.subschema_for::<AckOutput>(),
+                g.subschema_for::<ElementMatchOutput>(),
+                g.subschema_for::<ScreenshotOutput>(),
+            ],
+        })
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CursorOutput {
     pub x: i32,
     pub y: i32,
     pub monitor_id: u64,
+}
+
+// MCP requires every outputSchema root to be an object, so list-returning
+// tools wrap their array in a named field rather than returning a bare array.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MonitorsOutput {
+    pub monitors: Vec<MonitorInfo>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct WindowsOutput {
+    pub windows: Vec<WindowInfo>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ProcessesOutput {
+    pub processes: Vec<ProcessInfoOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct IdleOutput {
+    pub waited_ms: u32,
+    pub paint_observed: bool,
+    pub focus_settled: bool,
 }
 
 // ---------- shared action opts input fragment ----------
@@ -537,7 +581,17 @@ pub struct WaitForWindowArgs {
     pub timeout_ms: u32,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WaitForIdleArgs {
+    /// Target HWND. If unset, the foreground window is used.
+    pub hwnd: Option<u64>,
+    /// Wait budget in milliseconds. Defaults to 1000.
+    #[serde(default = "default_idle_timeout")]
+    pub timeout_ms: u32,
+}
+
 fn default_wait_timeout() -> u32 { 5000 }
+fn default_idle_timeout() -> u32 { 1000 }
 
 // ---------- Phase 4 output schemas ----------
 
@@ -776,9 +830,9 @@ impl Fastuse {
 
     // ---- window/monitor ----
     #[tool(name = "list_monitors", description = "Enumerate display monitors with bounds (physical pixels, virtual-desktop origin), DPI scale, and primary flag.")]
-    async fn list_monitors(&self) -> Result<Json<Vec<MonitorInfo>>, McpError> {
+    async fn list_monitors(&self) -> Result<Json<MonitorsOutput>, McpError> {
         match self.call(Request::ListMonitors).await? {
-            Response::Monitors(v) => Ok(Json(v)),
+            Response::Monitors(v) => Ok(Json(MonitorsOutput { monitors: v })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }
@@ -803,14 +857,14 @@ impl Fastuse {
     }
 
     #[tool(name = "list_windows", description = "List visible top-level Windows windows. Filter by title substring or process name. Returns hwnd, bounds, title, process name.")]
-    async fn list_windows(&self, Parameters(args): Parameters<ListWindowsArgs>) -> Result<Json<Vec<WindowInfo>>, McpError> {
+    async fn list_windows(&self, Parameters(args): Parameters<ListWindowsArgs>) -> Result<Json<WindowsOutput>, McpError> {
         let req = Request::ListWindows {
             process_name: args.process_name,
             title_substring: args.title_substring,
             visible_only: args.visible_only,
         };
         match self.call(req).await? {
-            Response::Windows(v) => Ok(Json(v)),
+            Response::Windows(v) => Ok(Json(WindowsOutput { windows: v })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }
@@ -1015,7 +1069,7 @@ impl Fastuse {
     }
 
     #[tool(name = "list_processes", description = "Enumerate running processes with optional name substring filter and visible-window filter.")]
-    async fn list_processes(&self, Parameters(args): Parameters<ListProcessesArgs>) -> Result<Json<Vec<ProcessInfoOutput>>, McpError> {
+    async fn list_processes(&self, Parameters(args): Parameters<ListProcessesArgs>) -> Result<Json<ProcessesOutput>, McpError> {
         let filter = if args.name_contains.is_some() || args.visible_only.is_some() {
             Some(fastuse_proto::ProcFilter {
                 name_contains: args.name_contains,
@@ -1026,12 +1080,14 @@ impl Fastuse {
         };
         let req = Request::ListProcesses(fastuse_proto::ListProcesses { filter });
         match self.call(req).await? {
-            Response::ListProcesses(v) => Ok(Json(v.into_iter().map(|p| ProcessInfoOutput {
-                pid: p.pid,
-                name: p.name,
-                exe_path: p.exe_path,
-                main_hwnd: p.main_hwnd,
-            }).collect())),
+            Response::ListProcesses(v) => Ok(Json(ProcessesOutput {
+                processes: v.into_iter().map(|p| ProcessInfoOutput {
+                    pid: p.pid,
+                    name: p.name,
+                    exe_path: p.exe_path,
+                    main_hwnd: p.main_hwnd,
+                }).collect(),
+            })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }
@@ -1058,6 +1114,19 @@ impl Fastuse {
         match self.call(Request::Warmup).await? {
             Response::Warmup { capture_us, uia_us, monitors_us, total_us } => {
                 Ok(Json(WarmupOutput { capture_us, uia_us, monitors_us, total_us }))
+            }
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    // ---- wait_for_idle ----
+    #[tool(name = "wait_for_idle", description = "Block until the target window's input queue drains (foreground if hwnd is None). Use between a click and a follow-up type when the app debounces or an ImGui-style focus shift needs a frame to settle. Returns waited_ms, paint_observed, and focus_settled.")]
+    async fn wait_for_idle(&self, Parameters(args): Parameters<WaitForIdleArgs>) -> Result<Json<IdleOutput>, McpError> {
+        let req = Request::WaitForIdle { hwnd: args.hwnd, timeout_ms: args.timeout_ms };
+        match self.call(req).await? {
+            Response::Idle { waited_ms, paint_observed, focus_settled } => {
+                Ok(Json(IdleOutput { waited_ms, paint_observed, focus_settled }))
             }
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
@@ -1196,5 +1265,34 @@ impl Fastuse {
         impl_.version = env!("CARGO_PKG_VERSION").into();
         info.server_info = impl_;
         info
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// Every tool's outputSchema must have root `"type": "object"`. rmcp
+    /// enforces this at registration time by panicking, so a violation takes
+    /// the whole server down at startup rather than failing one tool.
+    #[test]
+    fn output_schemas_are_objects() {
+        let offenders: Vec<String> = Fastuse::tool_router()
+            .list_all()
+            .into_iter()
+            .filter_map(|t| {
+                let schema = t.output_schema.as_ref()?;
+                match schema.get("type").and_then(|v| v.as_str()) {
+                    Some("object") => None,
+                    other => Some(format!("{}: type={:?}", t.name, other)),
+                }
+            })
+            .collect();
+        assert!(offenders.is_empty(), "non-object output schemas: {offenders:?}");
+    }
+
+    #[test]
+    fn wait_for_idle_is_registered() {
+        assert!(Fastuse::tool_router().has_route("wait_for_idle"));
     }
 }
