@@ -149,6 +149,155 @@ pub struct IdleOutput {
     pub focus_settled: bool,
 }
 
+
+// ---------- batch ----------
+
+/// One step in a `batch`. Deliberately a small set: the actions whose value
+/// comes from being sequenced without a model turn between them. Steps carry
+/// no per-step ActionOpts — end the batch with a `screenshot` step instead.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BatchStep {
+    Click {
+        x: i32,
+        y: i32,
+        #[serde(default = "left_button")]
+        button: String,
+        #[serde(default = "one_u8")]
+        count: u8,
+        #[serde(default)]
+        modifiers: Vec<String>,
+        #[serde(default)]
+        skip_set_cursor_pos: bool,
+    },
+    MouseMove { x: i32, y: i32 },
+    Scroll {
+        x: i32,
+        y: i32,
+        direction: String,
+        amount: i32,
+        #[serde(default)]
+        modifiers: Vec<String>,
+    },
+    Type {
+        text: String,
+        /// Inter-character delay in milliseconds. Defaults to 30, which is
+        /// safe on RichEditD2DPT-style controls; pass 0 for the bulk path.
+        #[serde(default = "default_type_rate")]
+        rate_ms: u32,
+    },
+    Key {
+        chord: String,
+        #[serde(default = "one_u32")]
+        repeat: u32,
+    },
+    Wait { duration_ms: u32 },
+    WaitForIdle {
+        hwnd: Option<u64>,
+        #[serde(default = "default_idle_timeout")]
+        timeout_ms: u32,
+    },
+    FocusWindow { hwnd: u64 },
+    Screenshot {
+        monitor: Option<u32>,
+        format: Option<String>,
+    },
+}
+
+impl BatchStep {
+    /// Short label echoed back in the per-step result.
+    fn label(&self) -> &'static str {
+        match self {
+            BatchStep::Click { .. } => "click",
+            BatchStep::MouseMove { .. } => "mouse_move",
+            BatchStep::Scroll { .. } => "scroll",
+            BatchStep::Type { .. } => "type",
+            BatchStep::Key { .. } => "key",
+            BatchStep::Wait { .. } => "wait",
+            BatchStep::WaitForIdle { .. } => "wait_for_idle",
+            BatchStep::FocusWindow { .. } => "focus_window",
+            BatchStep::Screenshot { .. } => "screenshot",
+        }
+    }
+
+    fn into_request(self) -> Result<Request, McpError> {
+        Ok(match self {
+            BatchStep::Click { x, y, button, count, modifiers, skip_set_cursor_pos } => {
+                Request::Click {
+                    x,
+                    y,
+                    button: parse_button(&button)?,
+                    count,
+                    modifiers,
+                    skip_set_cursor_pos,
+                    opts: None,
+                }
+            }
+            BatchStep::MouseMove { x, y } => Request::MouseMove { x, y, opts: None },
+            BatchStep::Scroll { x, y, direction, amount, modifiers } => Request::Scroll {
+                x,
+                y,
+                direction: parse_dir(&direction)?,
+                amount,
+                modifiers,
+                opts: None,
+            },
+            BatchStep::Type { text, rate_ms } => match rate_ms {
+                0 => Request::Type { text: Redact::new(text), opts: None },
+                rate_ms => Request::TypeRated { text: Redact::new(text), rate_ms, opts: None },
+            },
+            BatchStep::Key { chord, repeat } => {
+                fastuse_proto::parse_chord(&chord).map_err(|e| {
+                    McpError::invalid_params(format!("invalid chord {chord:?}: {e}"), None)
+                })?;
+                Request::Key { chord, repeat, opts: None }
+            }
+            BatchStep::Wait { duration_ms } => Request::Wait { duration_ms },
+            BatchStep::WaitForIdle { hwnd, timeout_ms } => {
+                Request::WaitForIdle { hwnd, timeout_ms }
+            }
+            BatchStep::FocusWindow { hwnd } => Request::FocusWindow { hwnd, opts: None },
+            BatchStep::Screenshot { monitor, format } => Request::Screenshot {
+                monitor,
+                format: Some(parse_image_format(format.as_deref())),
+            },
+        })
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct BatchArgs {
+    /// Steps run in order on the daemon, with no model turn between them.
+    pub steps: Vec<BatchStep>,
+    /// Keep going after a failing step instead of stopping there.
+    #[serde(default)]
+    pub continue_on_error: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct BatchStepResult {
+    /// Zero-based position in `steps`.
+    pub index: usize,
+    /// Which action this step ran.
+    pub action: String,
+    pub ok: bool,
+    /// Present when the step failed.
+    pub error: Option<String>,
+    /// Present for `screenshot` steps that succeeded.
+    pub screenshot: Option<ScreenshotOutput>,
+    /// Present for `wait_for_idle` steps that succeeded.
+    pub idle: Option<IdleOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct BatchOutput {
+    /// True when every step ran without error.
+    pub ok: bool,
+    /// Number of steps actually run (< steps.len() when stopped early).
+    pub ran: usize,
+    pub steps: Vec<BatchStepResult>,
+}
+
 // ---------- shared action opts input fragment ----------
 
 /// Optional post-action perception arguments that can be flattened into any
@@ -297,6 +446,10 @@ pub struct ScrollArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TypeArgs {
     pub text: String,
+    /// Fixed inter-character delay in milliseconds. Unset uses the bulk
+    /// "as fast as possible" path, which loses characters on Modern Notepad,
+    /// WinUI and other RichEditD2DPT controls; pass 30 or higher there.
+    pub rate_ms: Option<u32>,
     #[serde(flatten, default)]
     pub opts: ActionOptsArgs,
 }
@@ -593,6 +746,10 @@ pub struct WaitForIdleArgs {
 fn default_wait_timeout() -> u32 { 5000 }
 fn default_idle_timeout() -> u32 { 1000 }
 
+/// Inter-character delay for `batch` type steps. 30ms is the documented
+/// threshold that survives the SendInput overrun race on modern controls.
+fn default_type_rate() -> u32 { 30 }
+
 // ---------- Phase 4 output schemas ----------
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -800,10 +957,13 @@ impl Fastuse {
         action_or_ack_response(self.call(req).await?)
     }
 
-    #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged.")]
+    #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged. Set rate_ms (30+) for Modern Notepad / WinUI / RichEditD2DPT controls, which drop characters on the default bulk path.")]
     async fn type_text(&self, Parameters(args): Parameters<TypeArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let opts = build_action_opts(args.opts)?;
-        let req = Request::Type { text: Redact::new(args.text), opts };
+        let req = match args.rate_ms {
+            Some(rate_ms) => Request::TypeRated { text: Redact::new(args.text), rate_ms, opts },
+            None => Request::Type { text: Redact::new(args.text), opts },
+        };
         action_or_ack_response(self.call(req).await?)
     }
 
@@ -1120,6 +1280,65 @@ impl Fastuse {
         }
     }
 
+    // ---- batch ----
+    #[tool(
+        name = "batch",
+        description = "Run several actions in order in one call, with no model turn between them. Steps: click, mouse_move, scroll, type, key, wait, wait_for_idle, focus_window, screenshot. Stops at the first failing step unless continue_on_error is true. End with a screenshot step to see the result."
+    )]
+    async fn batch(&self, Parameters(args): Parameters<BatchArgs>) -> Result<Json<BatchOutput>, McpError> {
+        let total = args.steps.len();
+        let mut results: Vec<BatchStepResult> = Vec::with_capacity(total);
+        let mut all_ok = true;
+
+        for (index, step) in args.steps.into_iter().enumerate() {
+            let action = step.label().to_string();
+            let mut res = BatchStepResult {
+                index,
+                action,
+                ok: true,
+                error: None,
+                screenshot: None,
+                idle: None,
+            };
+
+            // An unparseable step is a step failure, not a whole-call failure,
+            // so earlier steps that already ran are still reported.
+            let outcome = match step.into_request() {
+                Ok(req) => self.call(req).await,
+                Err(e) => Err(e),
+            };
+
+            match outcome {
+                Ok(Response::Error(e)) => {
+                    res.ok = false;
+                    res.error = Some(format!("[{}] {}", e.code.as_str(), e.message));
+                }
+                Ok(Response::Screenshot { bytes, mime, width, height }) => {
+                    res.screenshot = Some(screenshot_output(bytes, mime, width, height));
+                }
+                Ok(Response::Idle { waited_ms, paint_observed, focus_settled }) => {
+                    res.idle = Some(IdleOutput { waited_ms, paint_observed, focus_settled });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    res.ok = false;
+                    res.error = Some(e.to_string());
+                }
+            }
+
+            let failed = !res.ok;
+            results.push(res);
+            if failed {
+                all_ok = false;
+                if !args.continue_on_error {
+                    break;
+                }
+            }
+        }
+
+        Ok(Json(BatchOutput { ok: all_ok, ran: results.len(), steps: results }))
+    }
+
     // ---- wait_for_idle ----
     #[tool(name = "wait_for_idle", description = "Block until the target window's input queue drains (foreground if hwnd is None). Use between a click and a follow-up type when the app debounces or an ImGui-style focus shift needs a frame to settle. Returns waited_ms, paint_observed, and focus_settled.")]
     async fn wait_for_idle(&self, Parameters(args): Parameters<WaitForIdleArgs>) -> Result<Json<IdleOutput>, McpError> {
@@ -1231,12 +1450,23 @@ fn action_or_ack_response(res: Response) -> Result<Json<ActionOrAck>, McpError> 
     }
 }
 
-fn screenshot_response(res: Response) -> Result<Json<ScreenshotOutput>, McpError> {
+/// Base64-encode a screenshot payload for the MCP edge. Shared by the
+/// `screenshot` tools and `batch` screenshot steps.
+fn screenshot_output(
+    bytes: Redact<Vec<u8>>,
+    mime: String,
+    width: u32,
+    height: u32,
+) -> ScreenshotOutput {
     use base64::Engine;
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
+    ScreenshotOutput { mime, width, height, data_b64 }
+}
+
+fn screenshot_response(res: Response) -> Result<Json<ScreenshotOutput>, McpError> {
     match res {
         Response::Screenshot { bytes, mime, width, height } => {
-            let data_b64 = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
-            Ok(Json(ScreenshotOutput { mime, width, height, data_b64 }))
+            Ok(Json(screenshot_output(bytes, mime, width, height)))
         }
         Response::Error(e) => Err(Fastuse::err_from_proto(e)),
         other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
@@ -1289,6 +1519,36 @@ mod schema_tests {
             })
             .collect();
         assert!(offenders.is_empty(), "non-object output schemas: {offenders:?}");
+    }
+
+    #[test]
+    fn batch_is_registered() {
+        assert!(Fastuse::tool_router().has_route("batch"));
+    }
+
+    /// A type step must take the rated path by default: the bulk path drops
+    /// characters on RichEditD2DPT controls (Modern Notepad, WinUI).
+    #[test]
+    fn batch_type_defaults_to_rated() {
+        let step: BatchStep =
+            serde_json::from_value(serde_json::json!({"action": "type", "text": "hi"})).unwrap();
+        match step.into_request().unwrap() {
+            Request::TypeRated { rate_ms, .. } => assert_eq!(rate_ms, 30),
+            other => panic!("expected TypeRated, got {other:?}"),
+        }
+        let bulk: BatchStep = serde_json::from_value(
+            serde_json::json!({"action": "type", "text": "hi", "rate_ms": 0}),
+        )
+        .unwrap();
+        assert!(matches!(bulk.into_request().unwrap(), Request::Type { .. }));
+    }
+
+    #[test]
+    fn batch_rejects_a_bad_chord() {
+        let step: BatchStep =
+            serde_json::from_value(serde_json::json!({"action": "key", "chord": "ctrl+nope"}))
+                .unwrap();
+        assert!(step.into_request().is_err());
     }
 
     #[test]
