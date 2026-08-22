@@ -150,6 +150,110 @@ pub struct IdleOutput {
 }
 
 
+
+// ---------- tail_file ----------
+
+/// Cap on bytes read in one call. A polling agent wants the newest tail, not
+/// a whole log, and every byte returned costs context.
+const TAIL_READ_CAP: u64 = 256 * 1024;
+
+fn default_tail_lines() -> usize { 200 }
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TailFileArgs {
+    /// Absolute path to the log file.
+    pub path: String,
+    /// Resume from this byte offset, normally `next_offset` from the previous
+    /// call, so a poll returns only what was appended since. Unset reads the
+    /// end of the file.
+    pub offset: Option<u64>,
+    /// Maximum lines to return, newest last. Capped at 2000.
+    #[serde(default = "default_tail_lines")]
+    pub max_lines: usize,
+    /// Case-insensitive substring filter; only matching lines are returned.
+    /// This is a plain substring, not a regex.
+    pub contains: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TailFileOutput {
+    /// Matching lines, oldest first.
+    pub lines: Vec<String>,
+    /// Pass back as `offset` next call to read only new appends.
+    pub next_offset: u64,
+    /// File size in bytes at read time.
+    pub size: u64,
+    /// True when older bytes were skipped because the read window was capped.
+    pub truncated: bool,
+    /// True when the file shrank below `offset` (rotated or rewritten), in
+    /// which case the read restarted from the beginning.
+    pub rotated: bool,
+}
+
+/// Read the tail of a file. Lives in the MCP server rather than behind a
+/// daemon round trip because it is plain file IO with no Windows capability
+/// attached.
+fn tail_file(args: TailFileArgs) -> Result<TailFileOutput, McpError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = std::path::Path::new(&args.path);
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| McpError::invalid_params(format!("open {}: {e}", args.path), None))?;
+    let size = f
+        .metadata()
+        .map_err(|e| McpError::internal_error(format!("stat {}: {e}", args.path), None))?
+        .len();
+
+    let mut rotated = false;
+    let mut start = match args.offset {
+        Some(off) if off > size => {
+            rotated = true;
+            0
+        }
+        Some(off) => off,
+        None => size.saturating_sub(TAIL_READ_CAP),
+    };
+
+    // Keep the newest window when the span is larger than the cap.
+    let mut truncated = false;
+    if size.saturating_sub(start) > TAIL_READ_CAP {
+        start = size - TAIL_READ_CAP;
+        truncated = true;
+    }
+
+    f.seek(SeekFrom::Start(start))
+        .map_err(|e| McpError::internal_error(format!("seek: {e}"), None))?;
+    let mut buf = Vec::new();
+    f.take(TAIL_READ_CAP)
+        .read_to_end(&mut buf)
+        .map_err(|e| McpError::internal_error(format!("read: {e}"), None))?;
+
+    let text = String::from_utf8_lossy(&buf);
+    // A mid-line start would emit a fragment; drop it unless we began at 0.
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() && args.offset.is_none() {
+        lines.remove(0);
+    }
+
+    let needle = args.contains.as_ref().map(|c| c.to_lowercase());
+    let mut out: Vec<String> = lines
+        .into_iter()
+        .filter(|l| match &needle {
+            Some(n) => l.to_lowercase().contains(n.as_str()),
+            None => true,
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    let max = args.max_lines.min(2000);
+    if out.len() > max {
+        truncated = true;
+        out.drain(..out.len() - max);
+    }
+
+    Ok(TailFileOutput { lines: out, next_offset: size, size, truncated, rotated })
+}
+
 // ---------- batch ----------
 
 /// One step in a `batch`. Deliberately a small set: the actions whose value
@@ -1280,6 +1384,15 @@ impl Fastuse {
         }
     }
 
+    // ---- tail_file ----
+    #[tool(
+        name = "tail_file",
+        description = "Read the tail of a log file, so the agent can see what an application reports rather than only what it renders. Pass next_offset back as offset to get only what was appended since the last call, and contains to filter to matching lines. Substring match, not regex."
+    )]
+    async fn tail_file(&self, Parameters(args): Parameters<TailFileArgs>) -> Result<Json<TailFileOutput>, McpError> {
+        Ok(Json(tail_file(args)?))
+    }
+
     // ---- batch ----
     #[tool(
         name = "batch",
@@ -1519,6 +1632,67 @@ mod schema_tests {
             })
             .collect();
         assert!(offenders.is_empty(), "non-object output schemas: {offenders:?}");
+    }
+
+    #[test]
+    fn tail_file_returns_only_new_lines_and_filters() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fastuse-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "tick 1").unwrap();
+        writeln!(f, "ERROR: boom").unwrap();
+        f.flush().unwrap();
+
+        let p = path.to_string_lossy().to_string();
+        let first = tail_file(TailFileArgs {
+            path: p.clone(),
+            offset: None,
+            max_lines: 200,
+            contains: None,
+        })
+        .unwrap();
+        assert_eq!(first.lines, vec!["tick 1", "ERROR: boom"]);
+
+        // Append, then resume from next_offset: only the new line comes back.
+        writeln!(f, "tick 2").unwrap();
+        writeln!(f, "ERROR: again").unwrap();
+        f.flush().unwrap();
+        let second = tail_file(TailFileArgs {
+            path: p.clone(),
+            offset: Some(first.next_offset),
+            max_lines: 200,
+            contains: None,
+        })
+        .unwrap();
+        assert_eq!(second.lines, vec!["tick 2", "ERROR: again"]);
+
+        // Filter applies to the resumed window only.
+        let filtered = tail_file(TailFileArgs {
+            path: p.clone(),
+            offset: Some(first.next_offset),
+            max_lines: 200,
+            contains: Some("error".to_string()),
+        })
+        .unwrap();
+        assert_eq!(filtered.lines, vec!["ERROR: again"]);
+
+        // A shrunk file means rotation; the read restarts from zero.
+        drop(f);
+        std::fs::write(&path, b"fresh
+").unwrap();
+        let rot = tail_file(TailFileArgs {
+            path: p,
+            offset: Some(second.next_offset),
+            max_lines: 200,
+            contains: None,
+        })
+        .unwrap();
+        assert!(rot.rotated, "shrunk file should report rotated");
+        assert_eq!(rot.lines, vec!["fresh"]);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
