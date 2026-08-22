@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.4.0 — 2026-08-22
+
+### Fixed
+- The MCP server panicked at startup, release builds included, so no client
+  could reach any tool. rmcp 1.6 requires every `outputSchema` to have root
+  type `object`; the derive on the untagged `ActionOrAck` emitted a bare
+  `anyOf`, and three list tools returned bare arrays. A test now asserts the
+  invariant across every registered tool.
+- The daemon no longer owns a console window. A stray click put that console
+  into QuickEdit mark mode, which blocks stderr writes, freezing the daemon
+  mid-serve while it still held the pipe name. Release builds are now
+  windows-subsystem; debug keeps its console.
+- `ERROR_PIPE_BUSY` is treated as a wait rather than a missing daemon, so a
+  collision between concurrent sessions no longer escalates to a UAC prompt.
+- `computer screenshot --format png` returned JPEG. The format is now threaded
+  through the v2 capture path; Anthropic-shaped clients still default to JPEG.
+- `type` lost characters on RichEditD2DPT / WinUI controls, where the bulk
+  SendInput path overruns the target. `rate_ms` is now reachable from MCP.
+
+### Added
+- `batch` runs several actions in one call with no model turn between them:
+  click, mouse_move, scroll, type, key, wait, wait_for_idle, focus_window,
+  screenshot. Type steps default to `rate_ms: 30`.
+- `tail_file` reads the tail of a log and returns `next_offset`, so a polling
+  agent receives only what was appended. Supports a `contains` filter and
+  reports rotation.
+- `launch_app` takes `capture_output`, redirecting the child's stdout and
+  stderr to a log under `%LOCALAPPDATA%\fastuse\logs\` and returning
+  `log_path` for `tail_file`. Previously that output went to the null device.
+- `wait_for_idle` is exposed over MCP. It existed everywhere else already.
+- A `fastuse` skill and a SessionStart hook that keeps the daemon up and
+  primes a session on how to drive it.
+
+### Notes
+- The wire format is postcard, which is not self-describing, so this release
+  is not compatible with an older daemon. Rebuild daemon and clients together.
+
 ## 2.3.1 — 2026-05-11
 
 ### Fixed
