@@ -920,6 +920,11 @@ pub enum ComputerAction {
         /// Optional monitor index; defaults to the foreground monitor.
         #[serde(default)]
         monitor: Option<u32>,
+        /// Output image format. `None` keeps the JPEG default that Anthropic
+        /// clients expect; the CLI passes this through so `--format png`
+        /// is honoured instead of silently downgraded.
+        #[serde(default)]
+        format: Option<ImageFormat>,
     },
     /// Single primary-button click at `coordinate`.
     LeftClick {
@@ -1276,7 +1281,7 @@ mod computer_action_tests {
         // Externally-tagged on the wire (postcard requirement). The MCP layer
         // uses `reshape_anthropic_action` to convert from Claude's internally-
         // tagged shape; here we exercise the wire shape directly.
-        let a = ComputerAction::Screenshot { monitor: Some(1) };
+        let a = ComputerAction::Screenshot { monitor: Some(1), format: None };
         let json = serde_json::to_string(&a).unwrap();
         let back: ComputerAction = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);

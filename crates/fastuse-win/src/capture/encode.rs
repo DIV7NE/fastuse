@@ -74,6 +74,21 @@ pub fn encode_jpeg_rgba(rgba: &[u8], w: u32, h: u32) -> Result<EncodedImage, Pro
     Ok(EncodedImage { bytes, mime: "image/jpeg" })
 }
 
+/// Encode pre-converted RGBA bytes in the requested format. Same contract as
+/// [`encode_jpeg_rgba`]; used by the v2 path so `--format png` is honoured
+/// rather than silently downgraded to JPEG.
+pub fn encode_rgba(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    format: ImageFormat,
+) -> Result<EncodedImage, ProtoError> {
+    match format {
+        ImageFormat::Jpeg => encode_jpeg_rgba(rgba, w, h),
+        ImageFormat::Png => Ok(EncodedImage { bytes: encode_png(rgba, w, h)?, mime: "image/png" }),
+    }
+}
+
 fn encode_jpeg(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ProtoError> {
     // image 0.25's JpegEncoder requires Rgb8 input; drop alpha into a
     // thread-local scratch (not per-call) to avoid the per-frame alloc.

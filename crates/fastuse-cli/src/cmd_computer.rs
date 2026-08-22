@@ -145,11 +145,23 @@ pub async fn screenshot(
     pipe_path: &str,
     out: Option<&Path>,
     monitor: Option<u32>,
-    _format: &str,
+    format: &str,
 ) -> anyhow::Result<()> {
-    // The daemon's Screenshot v2 always returns JPEG currently; format flag is
-    // accepted for forward-compat but not yet wired through ComputerAction.
-    dispatch(pipe_path, ComputerAction::Screenshot { monitor }, out).await
+    dispatch(
+        pipe_path,
+        ComputerAction::Screenshot { monitor, format: Some(parse_image_format(format)) },
+        out,
+    )
+    .await
+}
+
+/// Map the CLI's `--format` string onto the wire enum. Anything unrecognised
+/// falls back to the JPEG default rather than failing the capture.
+fn parse_image_format(s: &str) -> fastuse_proto::ImageFormat {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "png" => fastuse_proto::ImageFormat::Png,
+        _ => fastuse_proto::ImageFormat::Jpeg,
+    }
 }
 
 /// `computer left-click X Y [--modifiers "ctrl+shift"] [--instant]`
@@ -351,12 +363,8 @@ pub async fn wait(pipe_path: &str, ms: u32) -> anyhow::Result<()> {
 
 /// `computer zoom X Y [--factor 2.0]`
 pub async fn zoom(pipe_path: &str, x: i32, y: i32, factor: f32) -> anyhow::Result<()> {
-    dispatch(
-        pipe_path,
-        ComputerAction::Zoom { coordinate: [x, y], zoom_factor: factor },
-        None,
-    )
-    .await
+    dispatch(pipe_path, ComputerAction::Zoom { coordinate: [x, y], zoom_factor: factor }, None)
+        .await
 }
 
 /// `computer left-mouse-down [--x X] [--y Y]`

@@ -645,7 +645,7 @@ async fn dispatch_computer(
 
     match req.action {
         // ------------------------------------------------------------------
-        ComputerAction::Screenshot { monitor } => {
+        ComputerAction::Screenshot { monitor, format } => {
             let Some(capture) = ctx.capture.as_ref() else {
                 return Response::Error(Error::new(
                     ErrorCode::Internal,
@@ -653,7 +653,7 @@ async fn dispatch_computer(
                 ));
             };
             let target_max = fastuse_win::scaling::DEFAULT_TARGET_MAX;
-            match handle_screenshot_v2(capture, monitor, target_max) {
+            match handle_screenshot_v2(capture, monitor, target_max, format.unwrap_or_default()) {
                 Err(e) => Response::Error(e),
                 Ok(raw) => {
                     let snap = raw.to_snapshot();
@@ -662,7 +662,7 @@ async fn dispatch_computer(
                     Response::Computer(ComputerResult {
                         ok: true,
                         image: Some(ImagePayload {
-                            format: "jpeg".into(),
+                            format: mime_label(&raw.mime).into(),
                             width: raw.scaled_w,
                             height: raw.scaled_h,
                             data_base64: base64::engine::general_purpose::STANDARD
@@ -928,7 +928,17 @@ async fn dispatch_computer(
                 ));
             };
             let target_max = fastuse_win::scaling::DEFAULT_TARGET_MAX;
-            match handle_zoom_v2(capture, snap_now, coordinate, zoom_factor, target_max) {
+            // Zoom has no format knob on the wire: the Anthropic-shaped
+            // computer tool cannot carry one, so JPEG is the only reachable
+            // choice. The capture layer still takes it for uniformity.
+            match handle_zoom_v2(
+                capture,
+                snap_now,
+                coordinate,
+                zoom_factor,
+                target_max,
+                fastuse_proto::ImageFormat::Jpeg,
+            ) {
                 Err(e) => Response::Error(e),
                 Ok(raw) => {
                     let snap_zoom = raw.to_snapshot();
@@ -937,7 +947,7 @@ async fn dispatch_computer(
                     Response::Computer(ComputerResult {
                         ok: true,
                         image: Some(ImagePayload {
-                            format: "jpeg".into(),
+                            format: mime_label(&raw.mime).into(),
                             width: raw.scaled_w,
                             height: raw.scaled_h,
                             data_base64: base64::engine::general_purpose::STANDARD
@@ -1084,6 +1094,16 @@ fn parse_key_chord(
 }
 
 /// Build a [`ScaleInfo`] wire type from a [`ScaleSnapshot`].
+/// `ImagePayload.format` carries the short label ("jpeg"/"png"), while the
+/// capture layer reports a MIME type. Keep the wire label unchanged.
+fn mime_label(mime: &str) -> &'static str {
+    if mime == "image/png" {
+        "png"
+    } else {
+        "jpeg"
+    }
+}
+
 fn scale_info_from(snap: &fastuse_win::scaling::ScaleSnapshot) -> fastuse_proto::wire::ScaleInfo {
     fastuse_proto::wire::ScaleInfo {
         ratio: snap.ratio,

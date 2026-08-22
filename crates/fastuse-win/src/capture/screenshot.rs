@@ -20,7 +20,7 @@ use fastuse_proto::{
 use crate::capture::dxgi::{
     capture_into_staging, invalidate_state_on_display_change, FrameBuf,
 };
-use crate::capture::encode::{encode, encode_jpeg_rgba};
+use crate::capture::encode::{encode, encode_rgba};
 use crate::capture_thread::CaptureThreadHandle;
 use crate::scaling::{compute_ratio, scaled_dims, ScaleSnapshot};
 use crate::window::monitors::list_monitors;
@@ -249,8 +249,10 @@ pub fn handle_screenshot_window(
 /// deserialization.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ScreenshotV2Raw {
-    /// JPEG-encoded bytes.
+    /// Encoded bytes in the requested format.
     pub bytes: Vec<u8>,
+    /// MIME type of `bytes`, matching the requested format.
+    pub mime: String,
     /// Uniform scale ratio (`native / scaled`).
     pub ratio: f64,
     /// Top-left corner of the captured region in virtual-desktop coords.
@@ -293,12 +295,13 @@ pub fn handle_screenshot_v2(
     handle: &CaptureThreadHandle,
     monitor: Option<u32>,
     target_max: u32,
+    format: ImageFormat,
 ) -> Result<ScreenshotV2Raw, ProtoError> {
     // Determine origin (virtual-desktop top-left) for the chosen monitor.
     let (mon_idx, origin_x, origin_y) = resolve_monitor_origin(monitor)?;
     handle.run(move || {
         let buf = capture_with_outer_retry(mon_idx, None)?;
-        screenshot_v2_from_buf(&buf, origin_x, origin_y, target_max)
+        screenshot_v2_from_buf(&buf, origin_x, origin_y, target_max, format)
     })
 }
 
@@ -314,6 +317,7 @@ pub fn handle_zoom_v2(
     coordinate: [i32; 2],
     zoom_factor: f32,
     target_max: u32,
+    format: ImageFormat,
 ) -> Result<ScreenshotV2Raw, ProtoError> {
     use fastuse_proto::coords::Point;
     // Compute native rect of the zoom region.
@@ -335,16 +339,17 @@ pub fn handle_zoom_v2(
     let region = Rect { x: native_x, y: native_y, w: native_w, h: native_h };
     handle.run(move || {
         let buf = capture_with_outer_retry(0, Some(region))?;
-        screenshot_v2_from_buf(&buf, native_x, native_y, target_max)
+        screenshot_v2_from_buf(&buf, native_x, native_y, target_max, format)
     })
 }
 
-/// Shared inner: downscale BGRA `buf` to `target_max`, JPEG-encode, return raw.
+/// Shared inner: downscale BGRA `buf` to `target_max`, encode, return raw.
 fn screenshot_v2_from_buf(
     buf: &FrameBuf,
     origin_x: i32,
     origin_y: i32,
     target_max: u32,
+    format: ImageFormat,
 ) -> Result<ScreenshotV2Raw, ProtoError> {
     if buf.w == 0 || buf.h == 0 {
         return Err(ProtoError::new(ErrorCode::Internal, "zero-sized capture".to_string()));
@@ -352,9 +357,10 @@ fn screenshot_v2_from_buf(
     let ratio = compute_ratio(buf.w, buf.h, target_max);
     let (sw, sh) = scaled_dims(buf.w, buf.h, ratio);
     let rgba = resize_bgra_to_rgba(buf, sw, sh);
-    let img = encode_jpeg_rgba(&rgba, sw, sh)?;
+    let img = encode_rgba(&rgba, sw, sh, format)?;
     Ok(ScreenshotV2Raw {
         bytes: img.bytes,
+        mime: img.mime.to_string(),
         ratio,
         monitor_origin_x: origin_x,
         monitor_origin_y: origin_y,
