@@ -550,10 +550,11 @@ pub struct ScrollArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TypeArgs {
     pub text: String,
-    /// Fixed inter-character delay in milliseconds. Unset uses the bulk
-    /// "as fast as possible" path, which loses characters on Modern Notepad,
-    /// WinUI and other RichEditD2DPT controls; pass 30 or higher there.
-    pub rate_ms: Option<u32>,
+    /// Fixed inter-character delay in milliseconds, defaulting to 30. Pass 0
+    /// for the bulk "as fast as possible" path, which is faster but drops
+    /// characters on Modern Notepad, WinUI and other RichEditD2DPT controls.
+    #[serde(default = "default_type_rate")]
+    pub rate_ms: u32,
     #[serde(flatten, default)]
     pub opts: ActionOptsArgs,
 }
@@ -1069,12 +1070,12 @@ impl Fastuse {
         action_or_ack_response(self.call(req).await?)
     }
 
-    #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged. Set rate_ms (30+) for Modern Notepad / WinUI / RichEditD2DPT controls, which drop characters on the default bulk path.")]
+    #[tool(name = "type", description = "Type literal Unicode text into the foreground window. Payload is wrapped in Redact<> end-to-end and never logged. Types at rate_ms (default 30) per character, which is what survives Modern Notepad / WinUI / RichEditD2DPT controls; pass rate_ms 0 for the faster bulk path when the target is known to tolerate it.")]
     async fn type_text(&self, Parameters(args): Parameters<TypeArgs>) -> Result<Json<ActionOrAck>, McpError> {
         let opts = build_action_opts(args.opts)?;
         let req = match args.rate_ms {
-            Some(rate_ms) => Request::TypeRated { text: Redact::new(args.text), rate_ms, opts },
-            None => Request::Type { text: Redact::new(args.text), opts },
+            0 => Request::Type { text: Redact::new(args.text), opts },
+            rate_ms => Request::TypeRated { text: Redact::new(args.text), rate_ms, opts },
         };
         action_or_ack_response(self.call(req).await?)
     }
@@ -1730,6 +1731,18 @@ mod schema_tests {
         )
         .unwrap();
         assert!(matches!(bulk.into_request().unwrap(), Request::Type { .. }));
+    }
+
+    /// The type tool defaults to the rated path. The bulk path silently drops
+    /// characters on RichEditD2DPT / WinUI, so speed is the opt-in, not safety.
+    #[test]
+    fn type_tool_defaults_to_rated() {
+        let args: TypeArgs =
+            serde_json::from_value(serde_json::json!({"text": "hi"})).unwrap();
+        assert_eq!(args.rate_ms, 30);
+        let explicit: TypeArgs =
+            serde_json::from_value(serde_json::json!({"text": "hi", "rate_ms": 0})).unwrap();
+        assert_eq!(explicit.rate_ms, 0, "rate_ms 0 must still reach the bulk path");
     }
 
     #[test]

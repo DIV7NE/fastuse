@@ -25,11 +25,12 @@ instead - do not mix the two.
 
 ## The three rules that break tasks
 
-1. **Typing into modern controls needs a rate.** The default bulk path bursts
-   every character through SendInput with no delay and loses text on
-   RichEditD2DPT, WinUI, Modern Notepad and similar. Measured: typing
-   `batch verified 42` produced `batch 22222222222`. Pass `rate_ms: 30` to
-   `type` there. `computer({action: "type"})` is humanized and safe already.
+1. **Typing is rate-limited by default, and should stay that way.** `type`
+   defaults to `rate_ms: 30`, which is what survives RichEditD2DPT, WinUI and
+   Modern Notepad. `rate_ms: 0` selects the bulk path: roughly 7ms instead of
+   540ms for a short string, but it drops characters on those controls -
+   measured, `batch verified 42` came back as `h verified 42`. Only opt out
+   when the target is known to tolerate it.
 
 2. **Wait for the window, do not sleep.** Use `wait_for_idle` between a click
    and a follow-up `type`. It returns `focus_settled`, which is what tells you
