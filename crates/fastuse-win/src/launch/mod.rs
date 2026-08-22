@@ -62,11 +62,12 @@ pub fn launch_app(req: LaunchApp) -> Result<LaunchAppResp, FastuseError> {
         return Err(FastuseError::AppNotFound { query: q.into() });
     }
 
-    spawn_and_get_pid(&exe_path).map(|pid| LaunchAppResp {
+    spawn_and_get_pid(&exe_path, req.capture_output).map(|(pid, log_path)| LaunchAppResp {
         pid,
         hwnd: None, // HWND polling deferred — joins to Phase 2 list_windows.
         title: None,
         class: None,
+        log_path,
     })
 }
 
@@ -119,7 +120,7 @@ fn launch_uri(uri: &str) -> Result<LaunchAppResp, FastuseError> {
 
     // Per MSDN, HINSTANCE > 32 means success.
     if result.0 as isize > 32 {
-        Ok(LaunchAppResp { pid: 0, hwnd: None, title: None, class: None })
+        Ok(LaunchAppResp { pid: 0, hwnd: None, title: None, class: None, log_path: None })
     } else {
         Err(FastuseError::AppNotFound {
             query: format!("{uri}: ShellExecuteW returned {} — no handler registered?", result.0 as isize),
@@ -193,17 +194,33 @@ fn is_pe_executable(p: &Path) -> bool {
     hdr == *b"MZ"
 }
 
-fn spawn_and_get_pid(exe_path: &Path) -> Result<u32, FastuseError> {
+/// Spawn `exe_path` detached. With `capture_output`, stdout and stderr are
+/// redirected to a log file under `%LOCALAPPDATA%\fastuse\logs\` and its path
+/// is returned, so a caller can follow the child's output with `tail_file`.
+/// Without it they go to the null device, as before.
+fn spawn_and_get_pid(
+    exe_path: &Path,
+    capture_output: bool,
+) -> Result<(u32, Option<String>), FastuseError> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
+
+    // Fails closed: a caller that asked for output must not silently get none.
+    let (out, err, log_path) = if capture_output {
+        let (f, path) = create_capture_log(exe_path)?;
+        let f2 = f.try_clone().map_err(|e| FastuseError::Io(e.to_string()))?;
+        (Stdio::from(f), Stdio::from(f2), Some(path))
+    } else {
+        (Stdio::null(), Stdio::null(), None)
+    };
 
     // CREATE_NO_WINDOW: we want the child to live past us.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let child = Command::new(exe_path)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .map_err(|e| FastuseError::AppNotFound {
             query: format!("{}: {e}", exe_path.display()),
@@ -214,7 +231,28 @@ fn spawn_and_get_pid(exe_path: &Path) -> Result<u32, FastuseError> {
     // off to the UWP host; no alive check here so they succeed normally.
     std::mem::forget(child);
     let _ = Instant::now;
-    Ok(pid)
+    Ok((pid, log_path))
+}
+
+/// Create the capture log for a spawned app and return the open handle plus
+/// its path. Named with the exe stem and a spawn timestamp because the PID
+/// isn't known until after the spawn this file is an argument to.
+fn create_capture_log(exe_path: &Path) -> Result<(std::fs::File, String), FastuseError> {
+    let dir = fastuse_core::local_app_data()
+        .map_err(|e| FastuseError::Io(e.to_string()))?
+        .join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| FastuseError::Io(e.to_string()))?;
+    let stem = exe_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".to_string());
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| FastuseError::Io(e.to_string()))?
+        .as_millis();
+    let path = dir.join(format!("app-{stem}-{millis}.log"));
+    let file = std::fs::File::create(&path).map_err(|e| FastuseError::Io(e.to_string()))?;
+    Ok((file, path.to_string_lossy().to_string()))
 }
 
 fn is_pid_alive(pid: u32) -> bool {
@@ -264,9 +302,7 @@ mod tests {
 
     #[test]
     fn unknown_returns_app_not_found() {
-        let r = launch_app(LaunchApp {
-            query: "this_binary_does_not_exist_xyz123".into(),
-        });
+        let r = launch_app(LaunchApp { query: "this_binary_does_not_exist_xyz123".into(), capture_output: false });
         match r {
             Err(FastuseError::AppNotFound { .. }) => (),
             other => panic!("expected AppNotFound, got {other:?}"),
@@ -275,9 +311,7 @@ mod tests {
 
     #[test]
     fn launches_notepad_and_kills() {
-        let r = launch_app(LaunchApp {
-            query: "notepad".into(),
-        })
+        let r = launch_app(LaunchApp { query: "notepad".into(), capture_output: false })
         .expect("launch notepad");
         assert!(r.pid > 0);
         // Cleanup: terminate the spawned notepad.

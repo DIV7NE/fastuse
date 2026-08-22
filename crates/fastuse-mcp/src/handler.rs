@@ -800,6 +800,11 @@ pub struct ShellExecArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct LaunchAppArgs {
     pub query: String,
+    /// Redirect the app's stdout and stderr to a log file and return its path,
+    /// so `tail_file` can follow what the app reports. Off by default; without
+    /// it the child's output is discarded at spawn and cannot be recovered.
+    #[serde(default)]
+    pub capture_output: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -877,6 +882,9 @@ pub struct LaunchAppOutput {
     pub hwnd: Option<isize>,
     pub title: Option<String>,
     pub class: Option<String>,
+    /// Path of the captured stdout/stderr log, when `capture_output` was set.
+    /// Feed it to `tail_file`.
+    pub log_path: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1317,15 +1325,22 @@ impl Fastuse {
     }
 
     // ---- Phase 4: launch / process ----
-    #[tool(name = "launch_app", description = "Launch an application by PATH binary, absolute path, or known URI scheme. Returns spawned PID and main HWND if visible within 3s.")]
+    #[tool(name = "launch_app", description = "Launch an application by PATH binary, absolute path, or known URI scheme. Returns spawned PID and main HWND if visible within 3s. Set capture_output to redirect the app's stdout/stderr to a log file and get log_path back for tail_file; otherwise that output is discarded.")]
     async fn launch_app(&self, Parameters(args): Parameters<LaunchAppArgs>) -> Result<Json<LaunchAppOutput>, McpError> {
-        let req = Request::LaunchApp { req: fastuse_proto::LaunchApp { query: args.query }, opts: None };
+        let req = Request::LaunchApp {
+            req: fastuse_proto::LaunchApp {
+                query: args.query,
+                capture_output: args.capture_output,
+            },
+            opts: None,
+        };
         match self.call(req).await? {
             Response::LaunchApp(r) => Ok(Json(LaunchAppOutput {
                 pid: r.pid,
                 hwnd: r.hwnd,
                 title: r.title,
                 class: r.class,
+                log_path: r.log_path,
             })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),

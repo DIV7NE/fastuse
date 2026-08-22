@@ -575,6 +575,11 @@ impl core::fmt::Debug for ShellExecResult {
 pub struct LaunchApp {
     /// User-supplied query: absolute path, .lnk display name, AUMID, or PATH binary.
     pub query: String,
+    /// Redirect the child's stdout and stderr to a log file instead of
+    /// discarding them, so `tail_file` can read what the app reports.
+    /// Only honoured for the executable path; URI handlers give us no child.
+    #[serde(default)]
+    pub capture_output: bool,
 }
 
 /// `launch_app` response.
@@ -588,6 +593,9 @@ pub struct LaunchAppResp {
     pub title: Option<String>,
     /// Window class.
     pub class: Option<String>,
+    /// Path of the captured stdout/stderr log when `capture_output` was set.
+    #[serde(default)]
+    pub log_path: Option<String>,
 }
 
 /// `list_processes` filter.
@@ -1466,7 +1474,7 @@ mod tests {
     #[test]
     fn launch_app_round_trips() {
         let req = Request::LaunchApp {
-            req: LaunchApp { query: "notepad".into() },
+            req: LaunchApp { query: "notepad".into(), capture_output: false },
             opts: None,
         };
         let bytes = encode_frame(&req).unwrap();

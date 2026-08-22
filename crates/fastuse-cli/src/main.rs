@@ -376,6 +376,11 @@ enum Cmd {
         /// extra list-windows + focus-window round-trips.
         #[arg(long)]
         focus: bool,
+        /// Redirect the app's stdout/stderr to a log file under
+        /// %LOCALAPPDATA%\fastuse\logs\ and print its path. Without this the
+        /// child's output is discarded at spawn.
+        #[arg(long)]
+        capture_output: bool,
     },
     /// Enumerate running processes.
     ListProcesses {
@@ -875,7 +880,9 @@ fn main() {
             Cmd::ShellExec { command, shell, cwd, timeout_ms } => {
                 cmd_phase4::shell_exec(&identity.path, command, shell.as_deref(), cwd, timeout_ms).await
             }
-            Cmd::LaunchApp { query, focus } => cmd_phase4::launch_app(&identity.path, query, focus).await,
+            Cmd::LaunchApp { query, focus, capture_output } => {
+                cmd_phase4::launch_app(&identity.path, query, focus, capture_output).await
+            }
             Cmd::ListProcesses { name, visible_only } => {
                 let v = if visible_only { Some(true) } else { None };
                 cmd_phase4::list_processes(&identity.path, name, v).await

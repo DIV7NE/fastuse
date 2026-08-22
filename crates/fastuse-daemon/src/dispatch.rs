@@ -1200,7 +1200,7 @@ mod tests {
         let ctx = ctx_with(vec!["launch_app".into()]);
         let r = handle(
             Request::LaunchApp {
-                req: fastuse_proto::LaunchApp { query: "Authy".into() },
+                req: fastuse_proto::LaunchApp { query: "Authy".into() , capture_output: false },
                 opts: None,
             },
             &ctx,

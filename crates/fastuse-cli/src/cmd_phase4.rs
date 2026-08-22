@@ -115,8 +115,13 @@ pub async fn shell_exec(
     }
 }
 
-pub async fn launch_app(pipe_path: &str, query: String, focus: bool) -> anyhow::Result<()> {
-    let req = Request::LaunchApp { req: LaunchApp { query }, opts: None };
+pub async fn launch_app(
+    pipe_path: &str,
+    query: String,
+    focus: bool,
+    capture_output: bool,
+) -> anyhow::Result<()> {
+    let req = Request::LaunchApp { req: LaunchApp { query, capture_output }, opts: None };
     let resp = match one_call(pipe_path, req).await? {
         Response::LaunchApp(r) => r,
         Response::Error(e) => return print_err(e),
@@ -126,7 +131,7 @@ pub async fn launch_app(pipe_path: &str, query: String, focus: bool) -> anyhow::
     if !focus || resp.pid == 0 {
         println!(
             "{}",
-            json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class})
+            json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class, "log_path": resp.log_path})
         );
         return Ok(());
     }
@@ -168,13 +173,13 @@ pub async fn launch_app(pipe_path: &str, query: String, focus: bool) -> anyhow::
             let _ = read_response(&mut pipe).await;
             println!(
                 "{}",
-                json!({"ok": true, "pid": resp.pid, "hwnd": w.hwnd, "title": w.title, "class": w.class, "focused": true})
+                json!({"ok": true, "pid": resp.pid, "hwnd": w.hwnd, "title": w.title, "class": w.class, "focused": true, "log_path": resp.log_path})
             );
         }
         None => {
             println!(
                 "{}",
-                json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class})
+                json!({"ok": true, "pid": resp.pid, "hwnd": resp.hwnd, "title": resp.title, "class": resp.class, "log_path": resp.log_path})
             );
         }
     }
