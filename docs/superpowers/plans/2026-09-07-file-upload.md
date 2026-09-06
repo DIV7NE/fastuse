@@ -351,7 +351,7 @@ async fn file_dialog_set_saves_notepad_document() {
     std::fs::remove_file(&target).ok();
 }
 
-async fn wait_for_notepad(client: &mut Client) -> u64 {
+async fn wait_for_notepad(client: &mut TestClient) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let r = client
@@ -373,7 +373,7 @@ async fn wait_for_notepad(client: &mut Client) -> u64 {
 }
 ```
 
-Note: read `crates/fastuse-daemon/tests/harness/` first and match the actual `Client` type name and `connect_or_skip` signature used by `notepad_e2e.rs`; adjust the two helper call sites if they differ. Also confirm the `Response` variant that `ListWindows` returns (`notepad_e2e.rs` shows it) and use that name.
+Verified against the existing harness while writing this plan: `crates/fastuse-daemon/tests/harness/mod.rs` exposes `pub struct TestClient` with `pub async fn call(&mut self, req: Request) -> std::io::Result<Response>`, and `pub async fn connect_or_skip() -> TestClient` (not a `Result`). `ListWindows` returns `Response::Windows(Vec<WindowInfo>)`, and `fastuse_proto::Error` has public `code`, `message`, and `hint` fields. The test above uses all four as written.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1656,7 +1656,7 @@ const MOVE_STEPS: u32 = 20;
 
 1. `resolve_paths` first — before anything touches the mouse.
 2. Pick `start_x`/`start_y` when not supplied: a point on the same monitor as `(x, y)` (use the existing monitor enumeration), offset far enough from the target that the initial button-down cannot land on the drop zone.
-3. Spawn the helper with `spawn_medium_il(current_exe, ["--drag-helper"])`, write the `DragJob` JSON to its stdin, and read the `{"ready":true}` line back. If the helper dies before that line, return `ErrorCode::HelperSpawnFailed`.
+3. Spawn the helper with `spawn_medium_il(&current_exe, &["--drag-helper".to_string()])`, write the `DragJob` JSON to its stdin, and read the `{"ready":true}` line back. If the helper dies before that line, return `ErrorCode::HelperSpawnFailed`.
 4. Inject the left-button-down at the start point through the input thread.
 5. Walk the cursor to `(x, y)` in `MOVE_STEPS` steps with a short sleep between, then inject the left-button-up.
 6. Read the `DragOutcome` line with a deadline.
