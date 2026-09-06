@@ -39,8 +39,11 @@ single most consequential fact in the document; see the drag section.
 
 In the installed `windows 0.62.2`, `FORMATETC` and `STGMEDIUM` are in
 `Win32_System_Com`, which `fastuse-win` already enables. `DoDragDrop` and
-`IDropSource_Impl` are in `Win32_System_Ole`, which is the one new Cargo feature
-this work needs. `windows_core::implement` is exported unconditionally and needs
+`IDropSource_Impl` are in `Win32_System_Ole`, and the drag work needs three new
+Cargo features, not one: `IDataObject_Vtbl::new` is gated on
+`Win32_Graphics_Gdi` (already enabled) **and** `Win32_System_Com_StructuredStorage`
+(not enabled), and `IDropSource_Impl` is gated on `Win32_System_SystemServices`
+(not enabled). `windows_core::implement` is exported unconditionally and needs
 no feature flag.
 
 `WindowInfo` in `fastuse-proto/src/coords.rs` already carries `class`, so dialog
