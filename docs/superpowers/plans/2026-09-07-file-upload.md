@@ -20,6 +20,27 @@
 - Windows x64 only. `crates/fastuse-win/src/lib.rs` has a `compile_error!` guarding this.
 - Test command throughout: `cargo test -p <crate>`. E2E tests that need a live desktop are `#[ignore]`-gated and run with `-- --ignored`.
 
+## Agent and Model Assignment
+
+One implementer subagent per task, dispatched with the model named here. The rule behind the assignment: a task whose plan text already contains the code to write is transcription plus testing and takes the cheapest tier, while a task specified in prose — because writing invented Win32 or COM code into a plan would have been fabrication — needs a model that can read the installed crate source and decide. Reviews are separate dispatches and are listed alongside.
+
+| Task | What it is | Implementer | Task reviewer |
+|---|---|---|---|
+| 1. Foundations | Complete code given, 4 small files | `haiku` | `sonnet` |
+| 2. `file_dialog_set` core | Multi-file, three helpers specified in prose, UIA judgment | `opus` | `sonnet` |
+| 3. `file_dialog_set` surface | Transcription into 3 files | `haiku` | `sonnet` |
+| 4. `CF_HDROP` builder | Complete code given, 1 file, pure logic | `haiku` | `sonnet` |
+| 5. `clipboard_set_files` | Real Win32 clipboard work, publish path in prose | `opus` | `sonnet` |
+| 6. `clipboard_set_files` surface | Transcription into 3 files | `haiku` | `sonnet` |
+| 7. De-elevation spike | Token APIs, two approaches, a judgment call | `opus` | none — the deliverable is a recorded answer, not code |
+| 8. Drag helper | COM interface implementation, the hardest task here | `opus` | `opus` |
+| 9. `drag_files` orchestration | Process lifecycle, the `Drop`-guard recovery | `opus` | `opus` |
+| 10. `drag_files` surface | Transcription plus a coordinate-space check and live verification | `sonnet` | `sonnet` |
+
+Fix rounds 4 and 5 escalate one tier above the implementer that got stuck, per the SDD skill. The final whole-branch review runs on `opus` regardless of what the individual tasks used.
+
+Tasks 8 and 9 get `opus` on both seats because they are where a subtle mistake is invisible in a diff and expensive live: a reference-counting error in the `IDataObject` implementation, or a recovery path that lets an early return skip the button-up.
+
 ---
 
 ## File Structure
