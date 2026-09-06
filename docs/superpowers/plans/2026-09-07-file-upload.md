@@ -457,7 +457,6 @@ Create `crates/fastuse-win/src/files/dialog.rs`:
 //! which is atomic and does not depend on focus, with `WM_SETTEXT` as the
 //! fallback for dialogs that expose no usable UIA tree.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastuse_proto::{
@@ -466,6 +465,10 @@ use fastuse_proto::{
 
 use crate::input_thread::InputThreadHandle;
 use crate::uia_pool::UiaPoolHandle;
+
+// Note: `press_chord` in `input/modifier_guard.rs` is a different thing (it
+// takes `&[ModKey]` and returns a guard). The chord entry point is
+// `input::handlers::key(chord_str, repeat)`.
 use crate::window::list_windows::list_windows;
 
 /// Window class of every Win32 common dialog.
@@ -475,7 +478,7 @@ const DIALOG_CLASS: &str = "#32770";
 #[allow(clippy::too_many_arguments)]
 pub fn file_dialog_set(
     uia_pool: &UiaPoolHandle,
-    input: &Arc<InputThreadHandle>,
+    input: &InputThreadHandle,
     paths: Vec<String>,
     hwnd: Option<u64>,
     wait_for_dialog_ms: u32,
@@ -502,7 +505,7 @@ pub fn file_dialog_set(
 
     // Enter, not a click on the Open button: Enter is invariant to the
     // button's position and to the dialog's language.
-    input.run(move || crate::input::keyboard::press_chord("enter"))?;
+    input.run(move || crate::input::handlers::key("enter", 1))?;
 
     let closed = wait_for_close(dialog.hwnd, wait_for_close_ms);
     let follow_up_dialogs = dialogs_for_pid(scope_pid)?
@@ -657,27 +660,33 @@ In `crates/fastuse-daemon/src/dispatch.rs`, beside the other arms (the `Request:
             wait_for_close_ms,
             submit,
             opts,
-        } => {
-            let w = Instant::now();
-            let r = fastuse_win::files::dialog::file_dialog_set(
-                &ctx.uia_pool,
-                &ctx.input,
-                paths.into_inner(),
-                hwnd,
-                wait_for_dialog_ms,
-                wait_for_close_ms,
-                submit,
-            );
-            win32_us = w.elapsed().as_micros() as i64;
-            let inner = match r {
-                Ok(res) => Response::FileDialog(res),
-                Err(e) => Response::Error(e),
-            };
-            finalize(inner, opts, ctx)
-        }
+        } => match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+            (Some(uia), Some(input)) => {
+                let w = Instant::now();
+                let r = fastuse_win::files::dialog::file_dialog_set(
+                    uia,
+                    input,
+                    paths.into_inner(),
+                    hwnd,
+                    wait_for_dialog_ms,
+                    wait_for_close_ms,
+                    submit,
+                );
+                win32_us = w.elapsed().as_micros() as i64;
+                let inner = match r {
+                    Ok(res) => Response::FileDialog(res),
+                    Err(e) => Response::Error(e),
+                };
+                finalize(inner, opts, ctx)
+            }
+            _ => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool or input thread unavailable".to_string(),
+            )),
+        },
 ```
 
-Read the surrounding arms first and match how `ctx.uia_pool` / `ctx.input` are actually named and borrowed there — `handle_type_into_element` call sites in the same file show the convention.
+Verified in `dispatch.rs` while writing this plan, so do not re-derive it: `DispatchCtx` field for the UIA pool is `uia: Option<Arc<UiaPoolHandle>>` (NOT `uia_pool`), and the input handle is `input: Option<Arc<InputThreadHandle>>`. Both are `Option`s that surrounding arms unwrap with `.as_ref()` and an explicit `None` error arm — the `Request::UiaQuery` arm around line 413 is the pattern to copy. Match its `None` message style if it differs from the placeholder above.
 
 - [ ] **Step 7: Build and run the unit tests**
 
