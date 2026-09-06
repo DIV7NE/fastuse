@@ -73,9 +73,13 @@ from the app rejecting the file; it makes `CF_HDROP` produce a drop the target
 quietly discards. Validating once, up front, collapses all three of those into a
 single honest error.
 
-File paths carry usernames, and `xtask check-redact` lints suspect field names,
-so the wire field is `paths: Redact<Vec<String>>` and tracing spans record only
-a count and the resolved extensions. Errors returned to the agent do include the
+File paths carry usernames, so the wire field is `paths: Redact<Vec<String>>`
+and tracing spans record only a count and the resolved extensions. This is a
+deliberate choice rather than a lint requirement: `xtask/src/check_redact.rs`
+carries the suspect-name list `["payload", "text", "clipboard", "image_bytes",
+"secret", "password"]`, and `paths` is not on it, so nothing would currently
+force the wrapper. Add `paths` to that list as part of this work, so the
+decision is enforced rather than remembered. Errors returned to the agent do include the
 offending path: an agent that cannot see which path was wrong cannot fix it.
 
 `clipboard_set_files` clobbers exactly the resource `clipboard_set_text` and
@@ -177,6 +181,15 @@ short-lived process per drag. It receives the resolved paths and the target
 coordinate over the existing pipe protocol and exits when `DoDragDrop` returns.
 The daemon still injects the mouse movement, which is the one part that needs
 the elevated token.
+
+This introduces a second hop the tool surface does not otherwise have: daemon to
+helper, with its own framing and its own failure mode. `QueryContinueDrag`'s
+deadline protects against a drag wedging *inside* the helper; it does nothing if
+the helper is killed while holding the button down. So the daemon owns the
+recovery, not the helper: it injects the button-down, and it injects a
+button-up unconditionally when the helper's process handle signals or its own
+deadline expires, whichever comes first. A drag that fails must never leave the
+user's mouse button stuck.
 
 De-elevation duplicates the daemon's own token, lowers its integrity label to
 medium with `SetTokenInformation`, and spawns with `CreateProcessAsUser`. If
