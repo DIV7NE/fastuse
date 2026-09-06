@@ -70,6 +70,20 @@ pub enum ErrorCode {
     /// UIA selector resolved to more than one match and the caller did not
     /// pass `--first` (v2.1.0). Carries the match count in the message.
     AmbiguousMatch,
+    /// A path passed to a file-upload tool is missing, unreadable, or is a
+    /// directory where a file is required (v2.5.0).
+    FileNotFound,
+    /// `file_dialog_set` found no `#32770` common dialog within its wait
+    /// budget (v2.5.0).
+    DialogNotFound,
+    /// `file_dialog_set` submitted the dialog but it was still open when the
+    /// close wait expired — usually a wrong path, or a single-select dialog
+    /// given several paths (v2.5.0).
+    DialogStillOpen,
+    /// `drag_files` completed without the target accepting a drop (v2.5.0).
+    DragFailed,
+    /// The de-elevated drag helper process could not be started (v2.5.0).
+    HelperSpawnFailed,
 }
 
 impl ErrorCode {
@@ -101,6 +115,11 @@ impl ErrorCode {
             Self::EncodeFailed => "ENCODE_FAILED",
             Self::NoElementMatched => "NO_ELEMENT_MATCHED",
             Self::AmbiguousMatch => "AMBIGUOUS_MATCH",
+            Self::FileNotFound => "FILE_NOT_FOUND",
+            Self::DialogNotFound => "DIALOG_NOT_FOUND",
+            Self::DialogStillOpen => "DIALOG_STILL_OPEN",
+            Self::DragFailed => "DRAG_FAILED",
+            Self::HelperSpawnFailed => "HELPER_SPAWN_FAILED",
         }
     }
 }

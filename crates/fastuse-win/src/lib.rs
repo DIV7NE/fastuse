@@ -21,6 +21,7 @@ pub mod capture_thread;
 pub mod clipboard;
 pub mod com;
 pub mod dpi;
+pub mod files;
 pub mod input;
 pub mod input_thread;
 pub mod launch;

@@ -11,7 +11,7 @@ use std::path::Path;
 use syn::{File, Item};
 
 const SUSPICIOUS_FIELD_NAMES: &[&str] =
-    &["payload", "text", "clipboard", "image_bytes", "secret", "password"];
+    &["payload", "text", "clipboard", "image_bytes", "secret", "password", "paths"];
 
 pub fn run(workspace_root: &Path) -> anyhow::Result<()> {
     let mut failures: Vec<String> = Vec::new();
