@@ -55,7 +55,8 @@ target's input queue.
 ## Tool surface
 
     file_dialog_set { paths, hwnd?, wait_for_dialog_ms = 5000,
-                      wait_for_close_ms = 5000, submit = true }
+                      wait_for_close_ms = 5000, submit = true,
+                      allow_new = false }
     clipboard_set_files { paths, paste = false, hwnd? }
     drag_files { paths, x, y, start_x?, start_y? }
 
@@ -66,6 +67,15 @@ beside the existing ones. `clipboard_set_files` is the exception: it becomes a
 check applies to it without new wiring.
 
 ## Shared front half
+
+`file_dialog_set` in Save mode is the one caller that must accept a path which
+does not exist yet — naming a new file is exactly what a Save dialog is for. So
+`files/mod.rs` also exposes `resolve_paths_allowing_new`, which requires the
+parent directory to exist and the leaf not to be an existing directory, but
+permits a missing leaf. The request carries an explicit `allow_new` flag rather
+than inferring the mode, because guessing wrong in either direction is silent:
+inferring Save from a missing path would turn a caller's typo into a created
+file, and inferring Open would make every Save call fail validation.
 
 All three share one `resolve_paths` helper, living beside the new modules in
 `fastuse-win`, which canonicalizes every entry, stats it, and

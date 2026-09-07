@@ -47,7 +47,7 @@ Tasks 8 and 9 get `opus` on both seats because they are where a subtle mistake i
 
 **New files**
 
-- `crates/fastuse-win/src/files/mod.rs` — module root; owns `resolve_paths`, the shared front half for all three tools.
+- `crates/fastuse-win/src/files/mod.rs` — module root; owns `resolve_paths` and its Save-mode sibling `resolve_paths_allowing_new`, the shared front half for all three tools.
 - `crates/fastuse-win/src/files/dialog.rs` — `file_dialog_set`: discovery, fill, submit, close-confirm.
 - `crates/fastuse-win/src/files/hdrop.rs` — pure `CF_HDROP` byte-buffer construction. No Win32 calls, fully unit-testable.
 - `crates/fastuse-win/src/files/drag.rs` — daemon-side drag orchestration: spawn helper, walk cursor, guarantee button-up.
@@ -401,6 +401,10 @@ In `crates/fastuse-proto/src/wire.rs`, add to the `Request` enum after the `Wait
         wait_for_close_ms: u32,
         /// If false, fill the field and stop — no Enter, no close wait.
         submit: bool,
+        /// Permit paths that do not exist yet. Required for Save dialogs,
+        /// whose whole purpose is naming a file that is not there. The
+        /// parent directory must still exist.
+        allow_new: bool,
         /// Optional post-action perception bundle.
         opts: Option<ActionOpts>,
     },
@@ -484,8 +488,13 @@ pub fn file_dialog_set(
     wait_for_dialog_ms: u32,
     wait_for_close_ms: u32,
     submit: bool,
+    allow_new: bool,
 ) -> Result<FileDialogResult, ProtoError> {
-    let resolved = super::resolve_paths(&paths)?;
+    let resolved = if allow_new {
+        super::resolve_paths_allowing_new(&paths)?
+    } else {
+        super::resolve_paths(&paths)?
+    };
     let field_value = join_for_field(&resolved);
 
     let scope_pid = scope_pid(hwnd)?;
@@ -659,6 +668,7 @@ In `crates/fastuse-daemon/src/dispatch.rs`, beside the other arms (the `Request:
             wait_for_dialog_ms,
             wait_for_close_ms,
             submit,
+            allow_new,
             opts,
         } => match (ctx.uia.as_ref(), ctx.input.as_ref()) {
             (Some(uia), Some(input)) => {
@@ -671,6 +681,7 @@ In `crates/fastuse-daemon/src/dispatch.rs`, beside the other arms (the `Request:
                     wait_for_dialog_ms,
                     wait_for_close_ms,
                     submit,
+                    allow_new,
                 );
                 win32_us = w.elapsed().as_micros() as i64;
                 let inner = match r {
