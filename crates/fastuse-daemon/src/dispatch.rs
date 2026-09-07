@@ -255,9 +255,42 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             let tool = match &s {
                 ClipboardSet::Text(_) => "clipboard_set_text",
                 ClipboardSet::Image { .. } => "clipboard_set_image",
+                ClipboardSet::Files { .. } => "clipboard_set_files",
+            };
+            // Captured before `s` moves into the gate. `None` means no paste.
+            let paste_target = match &s {
+                ClipboardSet::Files { paste: true, hwnd, .. } => Some(*hwnd),
+                _ => None,
             };
             let inner = gate_then(tool, None, ctx, move |_| {
                 let w = Instant::now();
+                // Resolution happens here, not in `clipboard_set`: its
+                // `FastuseError` cannot carry `ErrorCode::FileNotFound`, and
+                // resolving first means a bad path never empties the
+                // user's clipboard.
+                let s = match s {
+                    ClipboardSet::Files { paths, paste, hwnd } => {
+                        match fastuse_win::files::resolve_paths(paths.as_inner()) {
+                            Ok(resolved) => ClipboardSet::Files {
+                                paths: fastuse_proto::Redact::new(
+                                    resolved
+                                        .iter()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .collect(),
+                                ),
+                                paste,
+                                hwnd,
+                            },
+                            Err(e) => {
+                                return (
+                                    Ok(Response::Error(e)),
+                                    w.elapsed().as_micros() as i64,
+                                );
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 let r = fastuse_win::clipboard::clipboard_set(s);
                 (
                     r.map(|_| Response::ClipboardSet),
@@ -266,6 +299,20 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             })
             .await
             .into_response_or_err(&mut win32_us);
+            // Paste only after the publish actually succeeded.
+            let inner = match (paste_target, &inner) {
+                (Some(hwnd), Response::ClipboardSet) => match ctx.input.as_ref() {
+                    Some(input) => match fastuse_win::files::paste_into(input, hwnd) {
+                        Ok(()) => inner,
+                        Err(e) => Response::Error(e),
+                    },
+                    None => Response::Error(Error::new(
+                        ErrorCode::Internal,
+                        "input thread unavailable".to_string(),
+                    )),
+                },
+                _ => inner,
+            };
             finalize(inner, opts, ctx)
         }
         Request::ShellExec(se) => {

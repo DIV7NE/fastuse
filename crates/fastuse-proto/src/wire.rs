@@ -475,6 +475,16 @@ pub enum ClipboardSet {
         /// Image height in pixels.
         h: u32,
     },
+    /// File list payload — published as `CF_HDROP`.
+    Files {
+        /// Absolute paths. Redacted: paths carry usernames.
+        paths: Redact<Vec<String>>,
+        /// Send Ctrl+V to the target after publishing.
+        paste: bool,
+        /// Window to focus before pasting. `None` uses the current
+        /// foreground window.
+        hwnd: Option<u64>,
+    },
 }
 
 impl core::fmt::Debug for ClipboardSet {
@@ -487,6 +497,12 @@ impl core::fmt::Debug for ClipboardSet {
                 .field("bytes", bytes)
                 .field("w", w)
                 .field("h", h)
+                .finish(),
+            Self::Files { paths, paste, hwnd } => f
+                .debug_struct("ClipboardSet::Files")
+                .field("path_count", &paths.as_inner().len())
+                .field("paste", paste)
+                .field("hwnd", hwnd)
                 .finish(),
         }
     }

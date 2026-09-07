@@ -35,6 +35,23 @@ pub fn resolve_paths_allowing_new(raw: &[String]) -> Result<Vec<PathBuf>, ProtoE
     resolve(raw, true)
 }
 
+/// Focus `hwnd` (or leave the current foreground window alone) and press
+/// Ctrl+V.
+///
+/// The `wait_for_idle` drain between focus and keystroke is what stops
+/// Electron targets from swallowing the paste: they process the activation
+/// message asynchronously and drop input that arrives before it lands.
+pub fn paste_into(
+    input: &crate::input_thread::InputThreadHandle,
+    hwnd: Option<u64>,
+) -> Result<(), ProtoError> {
+    if let Some(h) = hwnd {
+        crate::window::focus::focus_window(h)?;
+    }
+    let _ = crate::window::wait_for_idle::wait_for_idle(hwnd, 1000)?;
+    input.run(move || crate::input::handlers::key("ctrl+v", 1))
+}
+
 fn resolve(raw: &[String], allow_new: bool) -> Result<Vec<PathBuf>, ProtoError> {
     if raw.is_empty() {
         return Err(ProtoError::new(

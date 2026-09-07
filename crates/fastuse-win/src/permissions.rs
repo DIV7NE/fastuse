@@ -10,6 +10,7 @@ pub const DEFAULT_GATED: &[&str] = &[
     "shell_exec",
     "clipboard_set_text",
     "clipboard_set_image",
+    "clipboard_set_files",
 ];
 
 /// Holds the active permission policy for this daemon instance.

@@ -49,6 +49,8 @@ pub static TOOLS: &[ToolPerm] = &[
     ToolPerm { name: "clipboard_get_image", default_tier: Tier::Confirmed },
     ToolPerm { name: "clipboard_set_text", default_tier: Tier::Confirmed },
     ToolPerm { name: "clipboard_set_image", default_tier: Tier::Confirmed },
+    // Same resource clipboard_set_text/_image clobber, so the same tier.
+    ToolPerm { name: "clipboard_set_files", default_tier: Tier::Confirmed },
     // Shell exec.
     ToolPerm { name: "shell_exec", default_tier: Tier::Confirmed },
     // App launch — uniformly Confirmed in v1 (no Start-Menu / path downgrade).
