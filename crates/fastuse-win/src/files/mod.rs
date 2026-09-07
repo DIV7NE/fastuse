@@ -8,6 +8,7 @@
 //! the app rejecting the file) and makes `CF_HDROP` produce a drop the target
 //! quietly discards.
 
+pub mod deelevate;
 pub mod dialog;
 pub mod hdrop;
 

@@ -18,6 +18,7 @@
 
 mod action_opts;
 mod dispatch;
+mod drag_helper;
 mod idle;
 mod sd;
 mod sentinel;
@@ -62,6 +63,14 @@ fn parse_allow(arg: &str, env_fallback: Option<String>) -> Vec<String> {
 
 fn main() {
     set_per_monitor_v2_first_call();
+
+    // Medium-integrity drag-source mode. This must precede Args::parse (clap
+    // rejects the flag), the singleton, the sentinel and the pipe: the helper
+    // is the same binary re-executed, and it must never try to be the daemon.
+    if std::env::args().any(|a| a == "--drag-helper") {
+        return drag_helper::run();
+    }
+
     let args = Args::parse();
 
     // Tracing — keep guard alive for the rest of main.
