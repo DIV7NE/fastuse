@@ -6,8 +6,14 @@
 //! Run it from an **elevated** shell:
 //!   cargo run -p fastuse-win --example deelevate_spike
 //!
-//! Two approaches are tried in order. Success for either is a child whose
-//! integrity SID is `S-1-16-8192` (Medium Mandatory Level).
+//! Both approaches always run, even if the first succeeds: the elevated run is
+//! a one-shot and knowing whether the fallback also works is worth the second
+//! `cmd.exe`. Success for either is a child whose integrity SID is
+//! `S-1-16-8192` (Medium Mandatory Level).
+//!
+//! If both pass, compare the Administrators group line in the two `whoami
+//! /groups` files: approach A lowers the mandatory label only and keeps the
+//! Administrators SID, approach B borrows Explorer's genuine user token.
 //!
 //! Run non-elevated the answer is meaningless — approach A trivially "succeeds"
 //! by setting Medium on an already-Medium token — so the runner detects the
