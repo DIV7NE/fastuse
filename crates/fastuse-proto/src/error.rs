@@ -80,7 +80,10 @@ pub enum ErrorCode {
     /// close wait expired — usually a wrong path, or a single-select dialog
     /// given several paths (v2.5.0).
     DialogStillOpen,
-    /// `drag_files` completed without the target accepting a drop (v2.5.0).
+    /// `drag_files` could not perform the drag at all — the helper never got
+    /// the button-down, the drag was cancelled, or `DoDragDrop` failed. A
+    /// target that received the gesture and refused it is a successful call
+    /// reporting `dropped: false`, not this (v2.5.0).
     DragFailed,
     /// The de-elevated drag helper process could not be started (v2.5.0).
     HelperSpawnFailed,

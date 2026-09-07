@@ -243,7 +243,7 @@ pub fn drag_files(
             format!("the drag helper's outcome is not valid JSON: {e}"),
         )
     })?;
-    let result = map_outcome(outcome);
+    let result = map_outcome(outcome)?;
     tracing::info!(
         dropped = result.dropped,
         effect = result.effect,
@@ -352,14 +352,25 @@ fn lerp(sx: i32, sy: i32, ex: i32, ey: i32, step: u32, steps: u32) -> (i32, i32)
 /// `DoDragDrop` returns `DRAGDROP_S_DROP` even when the target refuses — the
 /// refusal shows up as `DROPEFFECT_NONE`. So a zero effect is a refusal, and
 /// it is `Ok`: the caller needs to know the gesture reached a target that said
-/// no, which is a different problem from the drag failing. Only the helper's
-/// own error string is [`ErrorCode::DragFailed`], and that is handled by the
-/// caller before this runs.
-fn map_outcome(o: DragOutcome) -> DragResult {
-    DragResult {
+/// no, which is a different problem from the drag failing.
+///
+/// An error string is the opposite case and must not share that shape: the
+/// helper only sets it when the drag could not be performed (no
+/// `WM_LBUTTONDOWN` before its deadline, `DRAGDROP_S_CANCEL`, a `DoDragDrop`
+/// HRESULT). Reporting those as a refusal would tell the agent — which the
+/// tool description instructs not to retry a refusal — that the target simply
+/// said no, and would throw away the only account of what went wrong.
+fn map_outcome(o: DragOutcome) -> Result<DragResult, ProtoError> {
+    if let Some(why) = o.error {
+        return Err(ProtoError::new(
+            ErrorCode::DragFailed,
+            format!("the drag helper reported: {why}"),
+        ));
+    }
+    Ok(DragResult {
         dropped: o.dropped && o.effect != 0,
         effect: o.effect,
-    }
+    })
 }
 
 /// Is `line` the helper's readiness line?
@@ -497,11 +508,11 @@ mod tests {
     fn a_refused_drop_is_a_result_not_a_failure() {
         // DoDragDrop reports DRAGDROP_S_DROP with DROPEFFECT_NONE when the
         // target says no. That is `dropped: false`, and it is not an error.
-        let refused = map_outcome(DragOutcome { dropped: true, effect: 0, error: None });
+        let refused = map_outcome(DragOutcome { dropped: true, effect: 0, error: None }).unwrap();
         assert!(!refused.dropped);
         assert_eq!(refused.effect, 0);
 
-        let accepted = map_outcome(DragOutcome { dropped: true, effect: 1, error: None });
+        let accepted = map_outcome(DragOutcome { dropped: true, effect: 1, error: None }).unwrap();
         assert!(accepted.dropped);
         assert_eq!(accepted.effect, 1);
 
@@ -510,6 +521,23 @@ mod tests {
         let e = early_failure(r#"{"dropped":false,"effect":0,"error":"OleInitialize failed"}"#);
         assert_eq!(e.code, ErrorCode::DragFailed);
         assert!(e.message.contains("OleInitialize failed"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_helper_error_after_ready_is_a_failure_and_never_a_refusal() {
+        // Every failure the helper hits *after* {"ready":true} — no
+        // WM_LBUTTONDOWN, DRAGDROP_S_CANCEL, a DoDragDrop HRESULT — arrives in
+        // exactly this shape. Mapping it to Ok(dropped: false) would read as a
+        // refusal, which the tool description tells the agent not to retry,
+        // and would discard the helper's reason. This test is what stops that.
+        let e = map_outcome(DragOutcome {
+            dropped: false,
+            effect: 0,
+            error: Some("no WM_LBUTTONDOWN arrived before the deadline".to_string()),
+        })
+        .expect_err("a helper error must not become Ok(dropped: false)");
+        assert_eq!(e.code, ErrorCode::DragFailed);
+        assert!(e.message.contains("no WM_LBUTTONDOWN"), "{}", e.message);
     }
 
     #[test]

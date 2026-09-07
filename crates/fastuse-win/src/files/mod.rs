@@ -158,7 +158,7 @@ mod tests {
         let out = resolve_paths_allowing_new(&[p.to_string_lossy().into_owned()]).unwrap();
         assert_eq!(out.len(), 1);
         let s = out[0].to_string_lossy().into_owned();
-        assert!(!s.starts_with(r"\?\"), "UNC prefix leaked: {s}");
+        assert!(!s.starts_with(r"\\?\"), "UNC prefix leaked: {s}");
         assert!(s.ends_with("fastuse_not_created_yet.txt"), "got {s}");
         assert!(!out[0].exists(), "resolver must not create the file");
     }

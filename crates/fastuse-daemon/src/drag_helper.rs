@@ -18,8 +18,12 @@
 //! wedges the helper *before* the ready line while the daemon waits for that
 //! line. Nothing reports it: stderr is deliberately not connected by the
 //! spawner, so nothing but those two lines can appear on the stream the daemon
-//! parses. `MediumIlChild::wait` being unconditionally timed is what recovers
-//! from that, and is the reason the null stderr is survivable.
+//! parses. What recovers from that is the daemon's own ready-line timeout,
+//! after which `HelperGuard::drop` kills the process; the kill is also what
+//! ends the daemon's stdout reader thread, which is otherwise parked in
+//! `read`. The daemon never waits on the helper's exit: the outcome line can
+//! only be written after the daemon releases the mouse button, so waiting for
+//! the process before reading that line would deadlock both sides.
 //!
 //! The daemon must not inject the button-down until it has read the ready
 //! line: before that the 1×1 source window does not exist, and the click
@@ -48,7 +52,8 @@ use windows::Win32::UI::Shell::CFSTR_PREFERREDDROPEFFECT;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW,
     SetLayeredWindowAttributes, TranslateMessage, LWA_ALPHA, MSG, PM_REMOVE, WM_LBUTTONDOWN,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 use windows_core::{Ref, BOOL, HRESULT, PCWSTR};
 
@@ -236,7 +241,13 @@ fn create_source_window(x: i32, y: i32) -> Result<HWND, String> {
     // SAFETY: every pointer argument is a live local or a static string.
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            // TOPMOST is load-bearing, not tidiness. The daemon's default
+            // start point is a monitor corner, and the bottom-right one sits
+            // under the taskbar, which *is* topmost. Without this the injected
+            // button-down lands on Shell_TrayWnd, this window never sees
+            // WM_LBUTTONDOWN, and the drag times out having clicked the user's
+            // taskbar.
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             class,
             PCWSTR::null(),
             WS_POPUP | WS_VISIBLE,

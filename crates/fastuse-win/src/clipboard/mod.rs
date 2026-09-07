@@ -231,6 +231,17 @@ fn write_cf_hdrop(paths: &[String]) -> Result<(), FastuseError> {
         }
         Ok(())
     })();
+    // A failure between the two SetClipboardData calls would otherwise leave
+    // CF_HDROP published with no drop effect, and Explorer reads an
+    // effect-less file list as a MOVE — the user's source file disappears on
+    // the next manual paste. Leave nothing behind rather than that.
+    if result.is_err() {
+        // SAFETY: the clipboard is still open; EmptyClipboard frees whatever
+        // we already handed over.
+        unsafe {
+            let _ = EmptyClipboard();
+        }
+    }
     // SAFETY: matched OpenClipboard.
     unsafe {
         let _ = CloseClipboard();

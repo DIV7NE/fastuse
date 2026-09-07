@@ -304,12 +304,12 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 (Some(hwnd), Response::ClipboardSet) => match ctx.input.as_ref() {
                     Some(input) => match fastuse_win::files::paste_into(input, hwnd) {
                         Ok(()) => inner,
-                        Err(e) => Response::Error(e),
+                        Err(e) => Response::Error(paste_failed_after_publish(e)),
                     },
-                    None => Response::Error(Error::new(
+                    None => Response::Error(paste_failed_after_publish(Error::new(
                         ErrorCode::Internal,
                         "input thread unavailable".to_string(),
-                    )),
+                    ))),
                 },
                 _ => inner,
             };
@@ -1234,6 +1234,33 @@ fn scale_info_from(snap: &fastuse_win::scaling::ScaleSnapshot) -> fastuse_proto:
         scaled_w: snap.scaled_w,
         scaled_h: snap.scaled_h,
     }
+}
+
+/// Rewrite a `paste: true` failure so it cannot be read as "nothing happened".
+///
+/// The publish already succeeded by the time this runs, and the files are on
+/// the clipboard. A bare paste error looks identical to a failed publish, so
+/// the caller's obvious next move is to republish — pointless work on a path
+/// that empties the user's clipboard first. `Response` has no room for a
+/// partial success and is append-only, so the fact is carried in the message.
+///
+/// `paste_into` fails on focus, idle-wait or key injection; none of those
+/// messages carry a path, so this is safe to log.
+fn paste_failed_after_publish(e: Error) -> Error {
+    tracing::error!(
+        code = %e.code.as_str(),
+        error = %e.message,
+        "clipboard_set_files: published, but the paste failed"
+    );
+    Error::new(
+        e.code,
+        format!(
+            "the files were published to the clipboard, but the paste failed: {}. \
+             The clipboard already holds them, so republishing achieves nothing; \
+             paste manually or retry only the paste.",
+            e.message
+        ),
+    )
 }
 
 /// Apply `ActionOpts` post-action perception. Returns the inner response
