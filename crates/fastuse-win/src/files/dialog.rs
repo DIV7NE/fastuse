@@ -55,7 +55,7 @@ pub fn file_dialog_set(
 
     let scope_pid = scope_pid(hwnd)?;
     let before: Vec<u64> = dialogs_for_pid(scope_pid)?.iter().map(|w| w.hwnd).collect();
-    let dialog = wait_for_dialog(scope_pid, wait_for_dialog_ms)?;
+    let dialog = wait_for_dialog(scope_pid, &before, wait_for_dialog_ms)?;
 
     let fill_method = fill_field(uia_pool, dialog.hwnd, &field_value)?;
 
@@ -138,21 +138,46 @@ fn dialogs_for_pid(pid: u32) -> Result<Vec<WindowInfo>, ProtoError> {
         .collect())
 }
 
-/// Poll on the same 50ms cadence `wait_for_window` uses.
-fn wait_for_dialog(pid: u32, timeout_ms: u32) -> Result<WindowInfo, ProtoError> {
+/// Poll on the same 50ms cadence `wait_for_window` uses, preferring a dialog
+/// that was not already up when the call started.
+///
+/// A process can be sitting on an unrelated `#32770` — a leftover prompt, or a
+/// dialog the user opened themselves — and filling that one types a path into
+/// something the caller never asked about. So a dialog absent from `before`
+/// wins the moment it appears.
+///
+/// An already-open dialog is still usable, but only once the budget is spent:
+/// `wait_for_dialog_ms: 0` means "it must already be up" (see
+/// `Request::FileDialogSet`), and the common flow — click Upload, then call —
+/// often races the dialog into existence before the request lands. Refusing a
+/// pre-existing dialog outright would break both.
+fn wait_for_dialog(
+    pid: u32,
+    before: &[u64],
+    timeout_ms: u32,
+) -> Result<WindowInfo, ProtoError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
     loop {
-        if let Some(w) = dialogs_for_pid(pid)?.into_iter().next() {
-            return Ok(w);
+        let open = dialogs_for_pid(pid)?;
+        if let Some(fresh) = pick_fresh(&open, before) {
+            return Ok(fresh.clone());
         }
         if Instant::now() >= deadline {
-            return Err(ProtoError::new(
-                ErrorCode::DialogNotFound,
-                format!("no #32770 dialog in pid {pid} within {timeout_ms}ms"),
-            ));
+            return match open.into_iter().next() {
+                Some(stale) => Ok(stale),
+                None => Err(ProtoError::new(
+                    ErrorCode::DialogNotFound,
+                    format!("no #32770 dialog in pid {pid} within {timeout_ms}ms"),
+                )),
+            };
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The first dialog that was not already up, if any.
+fn pick_fresh<'a>(open: &'a [WindowInfo], before: &[u64]) -> Option<&'a WindowInfo> {
+    open.iter().find(|w| !before.contains(&w.hwnd))
 }
 
 /// Watch the specific HWND we filled — not "any #32770 is gone". Save dialogs
@@ -265,6 +290,29 @@ mod tests {
             std::path::PathBuf::from(r"C:\a\c.txt"),
         ]);
         assert_eq!(two, "\"C:\\a\\b.txt\" \"C:\\a\\c.txt\"");
+    }
+
+    fn dialog(hwnd: u64) -> WindowInfo {
+        WindowInfo {
+            hwnd,
+            title: "Save as".into(),
+            class: DIALOG_CLASS.into(),
+            process_name: "notepad.exe".into(),
+            pid: 1,
+            bounds: fastuse_proto::Rect { x: 0, y: 0, w: 1, h: 1 },
+        }
+    }
+
+    #[test]
+    fn a_leftover_dialog_never_wins_over_a_fresh_one() {
+        let open = vec![dialog(1), dialog(2)];
+        // 1 was already up when the call started: filling it would type a path
+        // into a dialog the caller never asked about.
+        assert_eq!(pick_fresh(&open, &[1]).map(|w| w.hwnd), Some(2));
+        // Nothing new yet — keep waiting rather than grabbing the leftover.
+        assert!(pick_fresh(&open[..1], &[1]).is_none());
+        // No leftovers: the only dialog is the right one.
+        assert_eq!(pick_fresh(&open, &[]).map(|w| w.hwnd), Some(1));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use harness::*;
 /// Notepad's **Open** dialog: the path exists, so the strict resolver accepts
 /// it, and no overwrite prompt can appear.
 #[tokio::test]
-#[ignore = "E2E — spawns notepad.exe; requires a running daemon"]
+#[ignore = "E2E — force-kills every notepad.exe (unsaved text is lost); requires a running daemon"]
 async fn file_dialog_set_opens_notepad_document() {
     let mut client = connect_or_skip().await;
 
@@ -63,7 +63,7 @@ async fn file_dialog_set_opens_notepad_document() {
 /// case `allow_new` exists for. Nothing to overwrite, so the dialog closes and
 /// Notepad writes the file.
 #[tokio::test]
-#[ignore = "E2E — spawns notepad.exe; requires a running daemon"]
+#[ignore = "E2E — force-kills every notepad.exe (unsaved text is lost); requires a running daemon"]
 async fn file_dialog_set_saves_new_notepad_document() {
     let mut client = connect_or_skip().await;
 
@@ -118,7 +118,7 @@ async fn file_dialog_set_saves_new_notepad_document() {
 /// mistake the still-open dialog for success — answering it is destructive and
 /// belongs to the caller.
 #[tokio::test]
-#[ignore = "E2E — spawns notepad.exe; requires a running daemon"]
+#[ignore = "E2E — force-kills every notepad.exe (unsaved text is lost); requires a running daemon"]
 async fn file_dialog_set_reports_overwrite_prompt() {
     let mut client = connect_or_skip().await;
 
