@@ -35,6 +35,7 @@ const DIALOG_CLASS: &str = "#32770";
 const SEND_TIMEOUT_MS: u32 = 500;
 
 /// Fill (and optionally submit) a file dialog. See `Request::FileDialogSet`.
+#[allow(clippy::too_many_arguments)]
 pub fn file_dialog_set(
     uia_pool: &UiaPoolHandle,
     input: &InputThreadHandle,
@@ -43,8 +44,13 @@ pub fn file_dialog_set(
     wait_for_dialog_ms: u32,
     wait_for_close_ms: u32,
     submit: bool,
+    allow_new: bool,
 ) -> Result<FileDialogResult, ProtoError> {
-    let resolved = super::resolve_paths(&paths)?;
+    let resolved = if allow_new {
+        super::resolve_paths_allowing_new(&paths)?
+    } else {
+        super::resolve_paths(&paths)?
+    };
     let field_value = join_for_field(&resolved);
 
     let scope_pid = scope_pid(hwnd)?;

@@ -23,29 +23,66 @@ use fastuse_proto::{Error as ProtoError, ErrorCode};
 ///
 /// Fails the whole call if any entry is missing, unreadable, or a directory.
 pub fn resolve_paths(raw: &[String]) -> Result<Vec<PathBuf>, ProtoError> {
+    resolve(raw, false)
+}
+
+/// Save-mode sibling of [`resolve_paths`]: the leaf may be missing, because
+/// naming a file that is not there yet is what a Save dialog is for. The
+/// parent directory must still exist — a path under a mistyped directory is a
+/// mistake no dialog can recover from.
+pub fn resolve_paths_allowing_new(raw: &[String]) -> Result<Vec<PathBuf>, ProtoError> {
+    resolve(raw, true)
+}
+
+fn resolve(raw: &[String], allow_new: bool) -> Result<Vec<PathBuf>, ProtoError> {
     if raw.is_empty() {
         return Err(ProtoError::new(
             ErrorCode::FileNotFound,
             "paths: at least one path is required".to_string(),
         ));
     }
-    let mut out = Vec::with_capacity(raw.len());
-    for p in raw {
-        let canon = std::fs::canonicalize(p).map_err(|e| {
-            ProtoError::new(ErrorCode::FileNotFound, format!("path {p}: {e}"))
-        })?;
-        let meta = std::fs::metadata(&canon).map_err(|e| {
-            ProtoError::new(ErrorCode::FileNotFound, format!("path {p}: {e}"))
-        })?;
-        if meta.is_dir() {
-            return Err(ProtoError::new(
-                ErrorCode::FileNotFound,
-                format!("path {p}: is a directory, expected a file"),
-            ));
+    raw.iter().map(|p| resolve_one(p, allow_new)).collect()
+}
+
+fn resolve_one(raw: &str, allow_new: bool) -> Result<PathBuf, ProtoError> {
+    match std::fs::canonicalize(raw) {
+        Ok(canon) => {
+            let meta = std::fs::metadata(&canon).map_err(|e| {
+                ProtoError::new(ErrorCode::FileNotFound, format!("path {raw}: {e}"))
+            })?;
+            if meta.is_dir() {
+                return Err(ProtoError::new(
+                    ErrorCode::FileNotFound,
+                    format!("path {raw}: is a directory, expected a file"),
+                ));
+            }
+            Ok(strip_verbatim_prefix(canon))
         }
-        out.push(strip_verbatim_prefix(canon));
+        Err(e) if allow_new => {
+            let path = std::path::Path::new(raw);
+            let name = path.file_name().ok_or_else(|| {
+                ProtoError::new(
+                    ErrorCode::FileNotFound,
+                    format!("path {raw}: has no file name"),
+                )
+            })?;
+            let parent = match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => std::path::Path::new("."),
+            };
+            let parent = std::fs::canonicalize(parent).map_err(|_| {
+                ProtoError::new(
+                    ErrorCode::FileNotFound,
+                    format!("path {raw}: parent directory does not exist ({e})"),
+                )
+            })?;
+            Ok(strip_verbatim_prefix(parent).join(name))
+        }
+        Err(e) => Err(ProtoError::new(
+            ErrorCode::FileNotFound,
+            format!("path {raw}: {e}"),
+        )),
     }
-    Ok(out)
 }
 
 /// Strip the `\\?\` verbatim prefix that `canonicalize` adds on Windows.
@@ -82,6 +119,34 @@ mod tests {
     fn resolve_paths_rejects_directory() {
         let dir = std::env::temp_dir();
         let err = resolve_paths(&[dir.to_string_lossy().into_owned()]).unwrap_err();
+        assert_eq!(err.code, fastuse_proto::ErrorCode::FileNotFound);
+        assert!(err.message.contains("directory"), "message was {}", err.message);
+    }
+
+    #[test]
+    fn allowing_new_accepts_a_missing_leaf_under_an_existing_parent() {
+        let p = std::env::temp_dir().join("fastuse_not_created_yet.txt");
+        std::fs::remove_file(&p).ok();
+        let out = resolve_paths_allowing_new(&[p.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(out.len(), 1);
+        let s = out[0].to_string_lossy().into_owned();
+        assert!(!s.starts_with(r"\?\"), "UNC prefix leaked: {s}");
+        assert!(s.ends_with("fastuse_not_created_yet.txt"), "got {s}");
+        assert!(!out[0].exists(), "resolver must not create the file");
+    }
+
+    #[test]
+    fn allowing_new_rejects_a_missing_parent() {
+        let p = std::env::temp_dir().join("fastuse_no_such_dir").join("new.txt");
+        let err = resolve_paths_allowing_new(&[p.to_string_lossy().into_owned()]).unwrap_err();
+        assert_eq!(err.code, fastuse_proto::ErrorCode::FileNotFound);
+        assert!(err.message.contains("parent directory"), "message was {}", err.message);
+    }
+
+    #[test]
+    fn allowing_new_still_rejects_a_directory_leaf() {
+        let dir = std::env::temp_dir();
+        let err = resolve_paths_allowing_new(&[dir.to_string_lossy().into_owned()]).unwrap_err();
         assert_eq!(err.code, fastuse_proto::ErrorCode::FileNotFound);
         assert!(err.message.contains("directory"), "message was {}", err.message);
     }

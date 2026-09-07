@@ -392,6 +392,10 @@ pub enum Request {
         wait_for_close_ms: u32,
         /// If false, fill the field and stop — no Enter, no close wait.
         submit: bool,
+        /// Permit paths that do not exist yet. Required for Save dialogs,
+        /// whose whole purpose is naming a file that is not there. The
+        /// parent directory must still exist.
+        allow_new: bool,
         /// Optional post-action perception bundle.
         opts: Option<ActionOpts>,
     },

@@ -479,6 +479,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             wait_for_dialog_ms,
             wait_for_close_ms,
             submit,
+            allow_new,
             opts,
         } => {
             let inner = match (ctx.uia.as_ref(), ctx.input.as_ref()) {
@@ -492,6 +493,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                         wait_for_dialog_ms,
                         wait_for_close_ms,
                         submit,
+                        allow_new,
                     );
                     win32_us = w_start.elapsed().as_micros() as i64;
                     r.map(Response::FileDialog).unwrap_or_else(Response::Error)
