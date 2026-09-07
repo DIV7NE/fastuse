@@ -24,6 +24,12 @@ use fastuse_proto::{Error as ProtoError, ErrorCode, Rect, WindowInfo};
 
 use crate::window::list_windows::safe_get_window_text;
 
+/// True while `hwnd` still names a live window.
+pub fn is_window(hwnd: u64) -> bool {
+    // SAFETY: IsWindow accepts any HWND value; returns FALSE on stale.
+    unsafe { IsWindow(Some(HWND(hwnd as *mut core::ffi::c_void))) }.as_bool()
+}
+
 /// Build a `WindowInfo` for a live HWND.
 pub fn build_window_info(hwnd: HWND) -> Result<WindowInfo, ProtoError> {
     // SAFETY: IsWindow accepts any HWND value; returns FALSE on stale.

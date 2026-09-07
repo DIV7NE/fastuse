@@ -473,6 +473,36 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                 ),
             }
         }
+        Request::FileDialogSet {
+            paths,
+            hwnd,
+            wait_for_dialog_ms,
+            wait_for_close_ms,
+            submit,
+            opts,
+        } => {
+            let inner = match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+                (Some(uia), Some(input)) => {
+                    let w_start = Instant::now();
+                    let r = fastuse_win::files::dialog::file_dialog_set(
+                        uia,
+                        input,
+                        paths.into_inner(),
+                        hwnd,
+                        wait_for_dialog_ms,
+                        wait_for_close_ms,
+                        submit,
+                    );
+                    win32_us = w_start.elapsed().as_micros() as i64;
+                    r.map(Response::FileDialog).unwrap_or_else(Response::Error)
+                }
+                _ => Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "uia pool or input thread unavailable".to_string(),
+                )),
+            };
+            finalize(inner, opts, ctx)
+        }
     };
 
     DispatchResult {

@@ -8,6 +8,8 @@
 //! the app rejecting the file) and makes `CF_HDROP` produce a drop the target
 //! quietly discards.
 
+pub mod dialog;
+
 use std::path::PathBuf;
 
 use fastuse_proto::{Error as ProtoError, ErrorCode};
