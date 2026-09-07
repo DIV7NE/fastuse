@@ -404,15 +404,25 @@ pub enum Request {
     DragFiles {
         /// Absolute paths. Redacted: paths carry usernames.
         paths: Redact<Vec<String>>,
-        /// Drop target x, physical pixels, virtual-desktop origin.
+        /// Drop target x. Native virtual-desktop pixels, or scaled
+        /// image-pixel space per `coordinates_native` (same convention as
+        /// `ComputerRequest`).
         x: i32,
-        /// Drop target y, physical pixels.
+        /// Drop target y. See `x`.
         y: i32,
         /// Where the drag starts. Defaults to a point on the target's
-        /// monitor, away from the target itself.
+        /// monitor, away from the target itself. Same coordinate space as
+        /// `x`/`y`.
         start_x: Option<i32>,
         /// See `start_x`.
         start_y: Option<i32>,
+        /// When `true`, `x`/`y`/`start_x`/`start_y` are native
+        /// virtual-desktop pixels and `ScaleStack` translation is skipped
+        /// (CLI). When `false` (default), they are scaled image-pixel space
+        /// and are translated through the current `ScaleStack` snapshot
+        /// (MCP) — see `ComputerRequest::coordinates_native`.
+        #[serde(default)]
+        coordinates_native: bool,
         /// Optional post-action perception bundle.
         opts: Option<ActionOpts>,
     },

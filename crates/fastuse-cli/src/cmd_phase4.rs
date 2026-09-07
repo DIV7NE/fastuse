@@ -136,6 +136,29 @@ pub async fn file_dialog_set(
     }
 }
 
+pub async fn drag_files(
+    pipe_path: &str,
+    paths: Vec<String>,
+    x: i32,
+    y: i32,
+    start_x: Option<i32>,
+    start_y: Option<i32>,
+) -> anyhow::Result<()> {
+    let req = Request::DragFiles {
+        paths: Redact::new(paths), x, y, start_x, start_y,
+        coordinates_native: true,
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::Drag(r) => {
+            println!("{}", json!({"ok": true, "dropped": r.dropped, "effect": r.effect}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 pub async fn shell_exec(
     pipe_path: &str,
     command: String,

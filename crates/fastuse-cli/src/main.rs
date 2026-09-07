@@ -383,6 +383,23 @@ enum Cmd {
         #[arg(long)]
         allow_new: bool,
     },
+    /// Drop files onto a coordinate via OLE drag-and-drop (permission-gated).
+    DragFiles {
+        /// Absolute paths.
+        paths: Vec<String>,
+        /// Drop target x, native virtual-desktop pixels.
+        #[arg(long)]
+        x: i32,
+        /// Drop target y, native virtual-desktop pixels.
+        #[arg(long)]
+        y: i32,
+        /// Drag start x.
+        #[arg(long)]
+        start_x: Option<i32>,
+        /// Drag start y.
+        #[arg(long)]
+        start_y: Option<i32>,
+    },
     /// Run a shell command (permission-gated).
     ShellExec {
         /// Command line.
@@ -919,6 +936,9 @@ fn main() {
                     !fill_only, allow_new,
                 )
                 .await
+            }
+            Cmd::DragFiles { paths, x, y, start_x, start_y } => {
+                cmd_phase4::drag_files(&identity.path, paths, x, y, start_x, start_y).await
             }
             Cmd::ShellExec { command, shell, cwd, timeout_ms } => {
                 cmd_phase4::shell_exec(&identity.path, command, shell.as_deref(), cwd, timeout_ms).await

@@ -22,6 +22,7 @@ Three ways, in priority order:
 - `clipboard_set_text` — overwrites user's clipboard
 - `clipboard_set_image` — same
 - `clipboard_set_files` — overwrites the user's clipboard with a file list
+- `drag_files` — takes the real cursor and holds the mouse button
 
 Override the default list with `[permissions] gated_tools = ["..."]` in config.
 

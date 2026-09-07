@@ -816,6 +816,20 @@ pub struct FileDialogSetArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct DragFilesArgs {
+    /// Absolute paths to drop.
+    pub paths: Vec<String>,
+    /// Drop target x, in the same coordinate space as `computer` clicks.
+    pub x: i32,
+    /// Drop target y.
+    pub y: i32,
+    /// Where the drag starts. Omit for an automatic point on the same monitor.
+    pub start_x: Option<i32>,
+    /// See `start_x`.
+    pub start_y: Option<i32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ShellExecArgs {
     pub command: String,
     /// "cmd" (default) | "powershell" | "pwsh" | "bash"
@@ -902,6 +916,12 @@ pub struct FileDialogOutput {
     pub closed: bool,
     pub fill_method: String,
     pub follow_up_dialog_hwnds: Vec<u64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct DragOutput {
+    pub dropped: bool,
+    pub effect: u32,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1339,6 +1359,32 @@ impl Fastuse {
                 fill_method: r.fill_method,
                 follow_up_dialog_hwnds: r.follow_up_dialogs.iter().map(|w| w.hwnd).collect(),
             })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(
+        name = "drag_files",
+        description = "Drop files onto a screen coordinate with a real OLE drag-and-drop. Use for drop zones \
+                       that have no file input and do not accept a paste. Takes the real cursor for a moment. \
+                       Screenshot first: the coordinate must be current. Permission-gated (Confirmed tier)."
+    )]
+    async fn drag_files(
+        &self,
+        Parameters(args): Parameters<DragFilesArgs>,
+    ) -> Result<Json<DragOutput>, McpError> {
+        let req = Request::DragFiles {
+            paths: Redact::new(args.paths),
+            x: args.x,
+            y: args.y,
+            start_x: args.start_x,
+            start_y: args.start_y,
+            coordinates_native: false,
+            opts: None,
+        };
+        match self.call(req).await? {
+            Response::Drag(r) => Ok(Json(DragOutput { dropped: r.dropped, effect: r.effect })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }

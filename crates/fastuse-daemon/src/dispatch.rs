@@ -552,29 +552,43 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             };
             finalize(inner, opts, ctx)
         }
-        Request::DragFiles { paths, x, y, start_x, start_y, opts } => {
-            let inner = gate_then("drag_files", None, ctx, move |c| {
-                let w = Instant::now();
-                let r = match c.input.as_ref() {
-                    Some(input) => fastuse_win::files::drag::drag_files(
-                        input,
-                        paths.into_inner(),
-                        x,
-                        y,
-                        start_x,
-                        start_y,
-                    )
-                    .map_or_else(Response::Error, Response::Drag),
-                    None => Response::Error(Error::new(
-                        ErrorCode::Internal,
-                        "input thread unavailable".to_string(),
-                    )),
-                };
-                (Ok(r), w.elapsed().as_micros() as i64)
-            })
-            .await
-            .into_response_or_err(&mut win32_us);
-            finalize(inner, opts, ctx)
+        Request::DragFiles { paths, x, y, start_x, start_y, coordinates_native, opts } => {
+            let resolved = resolve_coord(&ctx.scale, [x, y], coordinates_native).and_then(
+                |drop| match (start_x, start_y) {
+                    (Some(sx), Some(sy)) => {
+                        resolve_coord(&ctx.scale, [sx, sy], coordinates_native)
+                            .map(|s| (drop, Some(s.x), Some(s.y)))
+                    }
+                    _ => Ok((drop, None, None)),
+                },
+            );
+            match resolved {
+                Err(resp) => resp,
+                Ok((drop, start_x, start_y)) => {
+                    let inner = gate_then("drag_files", None, ctx, move |c| {
+                        let w = Instant::now();
+                        let r = match c.input.as_ref() {
+                            Some(input) => fastuse_win::files::drag::drag_files(
+                                input,
+                                paths.into_inner(),
+                                drop.x,
+                                drop.y,
+                                start_x,
+                                start_y,
+                            )
+                            .map_or_else(Response::Error, Response::Drag),
+                            None => Response::Error(Error::new(
+                                ErrorCode::Internal,
+                                "input thread unavailable".to_string(),
+                            )),
+                        };
+                        (Ok(r), w.elapsed().as_micros() as i64)
+                    })
+                    .await
+                    .into_response_or_err(&mut win32_us);
+                    finalize(inner, opts, ctx)
+                }
+            }
         }
     };
 
