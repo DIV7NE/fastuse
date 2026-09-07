@@ -752,6 +752,9 @@ pub struct FileDialogSetArgs {
     pub wait_for_close_ms: Option<u32>,
     /// Fill only, do not press Enter. Default false.
     pub fill_only: Option<bool>,
+    /// Allow a path that does not exist yet. Set this for Save dialogs —
+    /// naming a new file is what they are for. Default false.
+    pub allow_new: Option<bool>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -784,6 +787,7 @@ In the same file, in the `#[tool_router]` impl block beside the clipboard tools:
             wait_for_dialog_ms: args.wait_for_dialog_ms.unwrap_or(5000),
             wait_for_close_ms: args.wait_for_close_ms.unwrap_or(5000),
             submit: !args.fill_only.unwrap_or(false),
+            allow_new: args.allow_new.unwrap_or(false),
             opts: None,
         };
         match self.call(req).await? {
@@ -820,15 +824,21 @@ In `crates/fastuse-cli/src/main.rs`, in the `Cmd` enum beside `ClipboardSetText`
         /// Fill the field but do not press Enter.
         #[arg(long)]
         fill_only: bool,
+        /// Allow a path that does not exist yet (Save dialogs).
+        #[arg(long)]
+        allow_new: bool,
     },
 ```
 
 And in the dispatch `match` (around line 879):
 
 ```rust
-            Cmd::FileDialogSet { paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only } => {
+            Cmd::FileDialogSet {
+                paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only, allow_new,
+            } => {
                 cmd_phase4::file_dialog_set(
-                    &identity.path, paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, !fill_only,
+                    &identity.path, paths, hwnd, wait_for_dialog_ms, wait_for_close_ms,
+                    !fill_only, allow_new,
                 )
                 .await
             }
@@ -846,6 +856,7 @@ pub async fn file_dialog_set(
     wait_for_dialog_ms: u32,
     wait_for_close_ms: u32,
     submit: bool,
+    allow_new: bool,
 ) -> anyhow::Result<()> {
     let req = Request::FileDialogSet {
         paths: Redact::new(paths),
@@ -853,6 +864,7 @@ pub async fn file_dialog_set(
         wait_for_dialog_ms,
         wait_for_close_ms,
         submit,
+        allow_new,
         opts: None,
     };
     match one_call(pipe_path, req).await? {
@@ -882,9 +894,9 @@ Run:
 cargo build --release
 ./target/release/fastuse-cli.exe launch-app notepad.exe
 ./target/release/fastuse-cli.exe computer key ctrl+s
-./target/release/fastuse-cli.exe file-dialog-set "$TEMP/fastuse_cli_check.txt"
+./target/release/fastuse-cli.exe file-dialog-set "$TEMP/fastuse_cli_check.txt" --allow-new
 ```
-Expected: JSON with `"closed": true`, and `%TEMP%\fastuse_cli_check.txt` on disk. Delete it afterwards.
+Expected: JSON with `"closed": true`, and `%TEMP%\fastuse_cli_check.txt` on disk. Delete it afterwards. `--allow-new` is required here because this is a Save dialog naming a file that does not exist yet; without it the call fails validation, which is the intended behaviour.
 
 - [ ] **Step 6: Commit**
 
