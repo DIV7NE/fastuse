@@ -214,16 +214,17 @@ that misbehaves, the fallback is borrowing `explorer.exe`'s token via
 `CreateProcessWithTokenW`. Which of the two actually works on this machine
 deserves a ten-line spike before the implementation plan freezes.
 
-The two are not interchangeable even if both work, and the difference is a
-security one. `SetTokenInformation(TokenIntegrityLevel)` lowers the mandatory
+Both were run elevated and both work; the choice between them is therefore a
+security one, and it is settled in favour of the shell token. `SetTokenInformation(TokenIntegrityLevel)` lowers the mandatory
 label and nothing else, so the child keeps an enabled Administrators SID: a
 medium-integrity process holding administrative group membership. Borrowing the
 shell's token instead yields the user's ordinary token, which is what the drag
 source should have — it needs to read the files being dragged and talk COM to a
-medium-IL target, nothing more. So prefer the shell-token path on least
-privilege, and if the label-lowering path is the only one that works, follow it
-with `CreateRestrictedToken` to disable the Administrators SID rather than
-shipping an admin-group drag helper.
+medium-IL target, nothing more. The elevated spike measured exactly this: the
+label-lowered child reports `BUILTIN\Administrators` as `Enabled group, Group
+owner`, while the shell-token child reports it as `Group used for deny only`.
+The helper therefore uses `CreateProcessWithTokenW` with the shell's token, and
+needs no `CreateRestrictedToken` step.
 
 Two alternatives were considered and rejected. Requiring a non-elevated daemon
 for dragging is nearly free, but it forces the user to choose per session

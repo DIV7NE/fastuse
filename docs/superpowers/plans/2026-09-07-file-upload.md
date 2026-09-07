@@ -1463,6 +1463,15 @@ Spike code deleted; only the answer survives, recorded in the plan."
 
 ## Task 8: The de-elevated drag helper
 
+> **Spike answered (Task 7, elevated run).** Both approaches produce a Medium-integrity child,
+> but they are not equivalent and **approach B wins**: borrow `explorer.exe`'s token via
+> `CreateProcessWithTokenW`. Evidence from the two children's own `whoami /groups`:
+> approach A leaves `BUILTIN\Administrators` as `Enabled group, Group owner` — a medium-IL
+> process still holding live admin membership — while approach B leaves it `Group used for
+> deny only`, which is the ordinary de-elevated user token. Implement B. No
+> `CreateRestrictedToken` step is needed.
+
+
 **Files:**
 - Modify: `crates/fastuse-win/Cargo.toml` (three new `windows` features)
 - Create: `crates/fastuse-win/src/files/deelevate.rs`
