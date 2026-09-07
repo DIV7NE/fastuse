@@ -96,8 +96,12 @@ decision is enforced rather than remembered. Errors returned to the agent do inc
 offending path: an agent that cannot see which path was wrong cannot fix it.
 
 `clipboard_set_files` clobbers exactly the resource `clipboard_set_text` and
-`clipboard_set_image` already clobber, so it joins the default gated list in
-`docs/permissions.md`. `drag_files` presses the real mouse button and walks the
+`clipboard_set_image` already clobber, so it joins the default gated list. That
+list is `DEFAULT_GATED` in `crates/fastuse-win/src/permissions.rs` — the one
+`FASTUSE_SAFE_MODE` actually consults. The `TOOLS` tier table in
+`fastuse-core/src/perm.rs` is the v1 mechanism and is vestigial under v2; a tool
+added only there sails straight through safe mode, so both get the entry and the
+two lists are kept in agreement. `drag_files` presses the real mouse button and walks the
 real cursor across the desktop, so it is gated too. `file_dialog_set` stays
 ungated: it types into a dialog the user's own agent just caused to open, which
 is no more privileged than the `computer` typing actions that are always

@@ -1602,6 +1602,7 @@ binary."
 
 **Files:**
 - Modify: `crates/fastuse-proto/src/wire.rs`
+- Modify: `crates/fastuse-win/src/permissions.rs` (`DEFAULT_GATED` — the list safe mode actually reads)
 - Modify: `crates/fastuse-core/src/perm.rs`
 - Create: `crates/fastuse-win/src/files/drag.rs`
 - Modify: `crates/fastuse-daemon/src/dispatch.rs`
@@ -1654,9 +1655,18 @@ pub struct DragResult {
 }
 ```
 
-In `crates/fastuse-core/src/perm.rs`:
+Gating lives in **two** places, and only one of them actually enforces safe mode. Task 5 discovered this the hard way, so do both:
 
 ```rust
+// crates/fastuse-win/src/permissions.rs — DEFAULT_GATED. THIS is the list
+// FASTUSE_SAFE_MODE consults. Omit an entry here and the tool sails through
+// safe mode no matter what perm.rs says.
+    "drag_files",
+```
+
+```rust
+// crates/fastuse-core/src/perm.rs — the v1 tier table. Vestigial under v2 but
+// kept consistent so the two lists never disagree.
     // Presses the real mouse button and walks the real cursor across the
     // desktop; same tier as the other tools that act on the user's session.
     ToolPerm { name: "drag_files", default_tier: Tier::Confirmed },
