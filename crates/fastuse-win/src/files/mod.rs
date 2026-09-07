@@ -10,6 +10,7 @@
 
 pub mod deelevate;
 pub mod dialog;
+pub mod drag;
 pub mod hdrop;
 
 use std::path::PathBuf;

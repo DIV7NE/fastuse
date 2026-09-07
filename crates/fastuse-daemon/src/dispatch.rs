@@ -552,6 +552,30 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             };
             finalize(inner, opts, ctx)
         }
+        Request::DragFiles { paths, x, y, start_x, start_y, opts } => {
+            let inner = gate_then("drag_files", None, ctx, move |c| {
+                let w = Instant::now();
+                let r = match c.input.as_ref() {
+                    Some(input) => fastuse_win::files::drag::drag_files(
+                        input,
+                        paths.into_inner(),
+                        x,
+                        y,
+                        start_x,
+                        start_y,
+                    )
+                    .map_or_else(Response::Error, Response::Drag),
+                    None => Response::Error(Error::new(
+                        ErrorCode::Internal,
+                        "input thread unavailable".to_string(),
+                    )),
+                };
+                (Ok(r), w.elapsed().as_micros() as i64)
+            })
+            .await
+            .into_response_or_err(&mut win32_us);
+            finalize(inner, opts, ctx)
+        }
     };
 
     DispatchResult {

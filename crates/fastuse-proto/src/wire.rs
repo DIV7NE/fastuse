@@ -399,6 +399,23 @@ pub enum Request {
         /// Optional post-action perception bundle.
         opts: Option<ActionOpts>,
     },
+    /// Drop files onto a screen coordinate via real OLE drag-and-drop.
+    /// Runs in a de-elevated child process; see the design doc.
+    DragFiles {
+        /// Absolute paths. Redacted: paths carry usernames.
+        paths: Redact<Vec<String>>,
+        /// Drop target x, physical pixels, virtual-desktop origin.
+        x: i32,
+        /// Drop target y, physical pixels.
+        y: i32,
+        /// Where the drag starts. Defaults to a point on the target's
+        /// monitor, away from the target itself.
+        start_x: Option<i32>,
+        /// See `start_x`.
+        start_y: Option<i32>,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
 }
 
 /// Clipboard format selector.
@@ -868,6 +885,17 @@ pub enum Response {
     // --- v2.5.0: file upload ---
     /// Outcome of a `FileDialogSet`.
     FileDialog(FileDialogResult),
+    /// Outcome of a `DragFiles`.
+    Drag(DragResult),
+}
+
+/// What `drag_files` observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DragResult {
+    /// True when the target accepted the drop.
+    pub dropped: bool,
+    /// The `DROPEFFECT` the target reported (1 = copy).
+    pub effect: u32,
 }
 
 /// What `file_dialog_set` observed.

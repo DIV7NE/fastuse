@@ -58,6 +58,9 @@ pub static TOOLS: &[ToolPerm] = &[
     // Process management.
     ToolPerm { name: "list_processes", default_tier: Tier::Free },
     ToolPerm { name: "kill_process", default_tier: Tier::Confirmed },
+    // Presses the real mouse button and walks the real cursor across the
+    // desktop; same tier as the other tools that act on the user's session.
+    ToolPerm { name: "drag_files", default_tier: Tier::Confirmed },
 ];
 
 /// Hardcoded deny-list (case-insensitive substring match).

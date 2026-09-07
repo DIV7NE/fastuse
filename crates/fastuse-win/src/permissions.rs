@@ -11,6 +11,9 @@ pub const DEFAULT_GATED: &[&str] = &[
     "clipboard_set_text",
     "clipboard_set_image",
     "clipboard_set_files",
+    // Presses the real mouse button and walks the real cursor across the
+    // desktop. This is the list safe mode actually consults.
+    "drag_files",
 ];
 
 /// Holds the active permission policy for this daemon instance.
@@ -83,6 +86,7 @@ mod tests {
         assert!(!p.is_allowed("kill_process"));
         assert!(!p.is_allowed("launch_app"));
         assert!(!p.is_allowed("shell_exec"));
+        assert!(!p.is_allowed("drag_files"));
         assert!(p.is_allowed("computer"));
         assert!(p.is_allowed("list_windows"));
     }

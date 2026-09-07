@@ -31,7 +31,7 @@ pub use selector::Selector;
 pub use uia_node::{ControlType, ImageFormat, TreeView, UIANode};
 pub use wire::{
     decode_frame, decode_payload, encode_frame, pipe_path_pattern, write_frame, ActionOpts,
-    ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, FileDialogResult, FrameError,
+    ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, DragResult, FileDialogResult, FrameError,
     KillProcess, LaunchApp,
     LaunchAppResp, ListProcesses, ProcFilter, ProcessInfo, ProcessSelector, RegionSpec, Request,
     Response, ScreenshotOpts, ScreenshotPayload, ShellChunk, ShellExec, ShellExecResult, ShellKind,
