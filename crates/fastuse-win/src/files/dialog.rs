@@ -192,15 +192,13 @@ fn fill_field(
 /// exposes an `Edit` per visible column cell — dozens of them, ahead of the
 /// real field in tree order — so an unqualified "first Edit" writes into a
 /// column header and the dialog then refuses to close. `1148` is `cmb13`, the
-/// Vista+ `IFileDialog` filename combo; `1152` is `edt1`, the legacy
-/// `GetOpenFileName` edit. The class tier catches dialogs that publish
-/// neither: the noise controls are `UIProperty` / `SearchEditBox`, never a
-/// plain `Edit`.
+/// filename combo of the Win11 `IFileDialog` this was verified against. The
+/// class tier is the fallback for dialogs that publish another id: the noise
+/// controls are `UIProperty` / `SearchEditBox`, never a plain `Edit`.
 fn filename_selectors() -> Vec<Selector> {
     let edit = Selector::ByControlType(ControlType::Edit);
     vec![
         Selector::And(vec![edit.clone(), Selector::ByAutomationId("1148".into())]),
-        Selector::And(vec![edit.clone(), Selector::ByAutomationId("1152".into())]),
         Selector::And(vec![edit, Selector::ByClass("Edit".into())]),
     ]
 }
