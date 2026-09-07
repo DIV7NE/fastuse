@@ -1367,8 +1367,11 @@ impl Fastuse {
     #[tool(
         name = "drag_files",
         description = "Drop files onto a screen coordinate with a real OLE drag-and-drop. Use for drop zones \
-                       that have no file input and do not accept a paste. Takes the real cursor for a moment. \
-                       Screenshot first: the coordinate must be current. Permission-gated (Confirmed tier)."
+                       that have no file input and do not accept a paste. Takes the real cursor and holds the \
+                       mouse button down for the duration of the drag. Screenshot first: the coordinate must \
+                       be current. A target that refuses the drop returns dropped: false with no error — that \
+                       is information, not a failure, and should not be retried or escalated. \
+                       Permission-gated (Confirmed tier)."
     )]
     async fn drag_files(
         &self,

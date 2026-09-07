@@ -559,7 +559,11 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                         resolve_coord(&ctx.scale, [sx, sy], coordinates_native)
                             .map(|s| (drop, Some(s.x), Some(s.y)))
                     }
-                    _ => Ok((drop, None, None)),
+                    (None, None) => Ok((drop, None, None)),
+                    _ => Err(Response::Error(Error::new(
+                        ErrorCode::Internal,
+                        "start_x and start_y must both be set or both omitted".to_string(),
+                    ))),
                 },
             );
             match resolved {
@@ -1480,6 +1484,54 @@ mod tests {
         match r.response {
             Response::ListProcesses(_) => (),
             other => panic!("expected ListProcesses (not gated), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_files_scaled_coords_require_scale_context() {
+        // No screenshot has been taken, so the ScaleStack is empty. With
+        // coordinates_native: false this must go through resolve_coord and
+        // fail closed *before* gate_then — proving the DragFiles arm still
+        // calls resolve_coord instead of passing x/y straight through.
+        let ctx = ctx_with(vec!["drag_files".into()]);
+        let r = handle(
+            Request::DragFiles {
+                paths: Redact::new(vec!["C:\\x.png".into()]),
+                x: 10,
+                y: 10,
+                start_x: None,
+                start_y: None,
+                coordinates_native: false,
+                opts: None,
+            },
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::Internal),
+            other => panic!("expected no-scale-context error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_files_partial_start_point_is_rejected() {
+        let ctx = ctx_with(vec!["drag_files".into()]);
+        let r = handle(
+            Request::DragFiles {
+                paths: Redact::new(vec!["C:\\x.png".into()]),
+                x: 10,
+                y: 10,
+                start_x: Some(5),
+                start_y: None,
+                coordinates_native: true,
+                opts: None,
+            },
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::Internal),
+            other => panic!("expected rejection of a lone start axis, got {other:?}"),
         }
     }
 }
