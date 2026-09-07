@@ -1153,9 +1153,12 @@ const DROPEFFECT_COPY: u32 = 1;
 
 Add a `ClipboardSet::Files` arm to `clipboard_set` that, on the existing STA helper thread, opens the clipboard, empties it, and publishes two formats: the `build_hdrop` buffer under `CF_HDROP`, and a 4-byte `DROPEFFECT_COPY` under the registered format `CFSTR_PREFERREDDROPEFFECT` (obtained with `RegisterClipboardFormatW(w!("Preferred DropEffect"))`). Both payloads go into `GlobalAlloc(GMEM_MOVEABLE, len)` blocks, filled under `GlobalLock`/`GlobalUnlock` — copy the existing image path's allocation helper rather than writing a new one; ownership transfers to the clipboard on `SetClipboardData`, so the handles must not be freed afterwards.
 
-Path resolution happens before the clipboard is touched: `let resolved = crate::files::resolve_paths(&paths.into_inner())?;` so a bad path never empties the user's clipboard.
+**Two responsibilities that deliberately do NOT live in `clipboard_set`,** because its signature cannot carry them. It is `clipboard_set(set: ClipboardSet) -> Result<(), FastuseError>`: no input-thread handle, and `FastuseError` has no variant that can carry an arbitrary `ErrorCode`, so a `FileNotFound` from path resolution would be flattened into `Internal` and the agent would lose the one code that tells it which path was wrong.
 
-When `paste` is true, after the clipboard is closed: focus `hwnd` if given via the existing focus helper, run the existing `wait_for_idle` drain against it, then send `ctrl+v` through the input thread. The drain is what stops Electron targets from swallowing the paste.
+So both happen in the dispatch arm instead:
+
+1. **Path resolution**, inside the gated closure and before `clipboard_set` is called, so a bad path never empties the user's clipboard and the `ProtoError` reaches the wire with its code intact. Resolve, then rebuild the variant with the resolved absolute strings and hand that to `clipboard_set`, which therefore only ever sees paths that are already valid.
+2. **The paste**, after the gate returns success, using `ctx.input`. Add a small `files::paste_into(input: &InputThreadHandle, hwnd: Option<u64>) -> Result<(), ProtoError>` helper that focuses `hwnd` when given via `window::focus::focus_window`, runs `window::wait_for_idle::wait_for_idle(hwnd, 1000)`, then sends `input::handlers::key("ctrl+v", 1)`. The drain is what stops Electron targets from swallowing the paste. Keeping it in `files/` rather than inline keeps `dispatch.rs`, already 1400 lines, from growing a fourth responsibility.
 
 Add the two read-back helpers the test calls. `#[cfg(test)]` does **not** apply to an integration test under `tests/`, so these are ordinary `pub` functions marked `#[doc(hidden)]` — read `crates/fastuse-win/tests/bench_phase4.rs` first and match however it already reaches into this crate:
 
