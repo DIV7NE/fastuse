@@ -222,7 +222,9 @@ pub fn spawn_medium_il(exe: &Path, args: &[String]) -> Result<MediumIlChild, Pro
 /// session onto it, so it needs `TOKEN_ADJUST_DEFAULT` and
 /// `TOKEN_ADJUST_SESSIONID` as well. Measured on this API: the documented
 /// three, plus either adjust right alone, all return 0x80070005; only both
-/// together succeed.
+/// together succeed. That bisection was additive from the documented base, so
+/// this is the smallest set among those tested — no right in it has been
+/// proved individually necessary, `TOKEN_QUERY` included.
 const SECLOGON_TOKEN_RIGHTS: TOKEN_ACCESS_MASK = TOKEN_ACCESS_MASK(
     TOKEN_ASSIGN_PRIMARY.0
         | TOKEN_DUPLICATE.0
@@ -308,12 +310,17 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Security::TOKEN_ADJUST_PRIVILEGES;
 
     #[test]
     fn the_token_mask_keeps_the_two_undocumented_seclogon_rights() {
-        // Trimming this back to the three documented rights makes every spawn
-        // fail with ERROR_ACCESS_DENIED. 0x18b is the measured minimum.
-        assert_eq!(SECLOGON_TOKEN_RIGHTS.0, 0x0000_018b);
+        // Trimming back to the three documented rights makes every spawn fail
+        // with ERROR_ACCESS_DENIED; widening to TOKEN_ALL_ACCESS works but
+        // hands the child rights it never uses. Both directions are pinned.
+        let m = SECLOGON_TOKEN_RIGHTS.0;
+        assert_eq!(m & TOKEN_ADJUST_DEFAULT.0, TOKEN_ADJUST_DEFAULT.0);
+        assert_eq!(m & TOKEN_ADJUST_SESSIONID.0, TOKEN_ADJUST_SESSIONID.0);
+        assert_eq!(m & TOKEN_ADJUST_PRIVILEGES.0, 0);
     }
 
     #[test]

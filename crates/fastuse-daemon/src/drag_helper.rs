@@ -477,8 +477,11 @@ mod tests {
         // end as a drop with DROPEFFECT_NONE.
         let d = HdropData::new(&[r"C:\Windows\win.ini".to_string()]).unwrap();
         let fmts = d.enumerable_formats();
-        assert_eq!(fmts.len(), 2);
         assert!(fmts.iter().any(|f| f.cfFormat == CF_HDROP.0));
+        // Pinned by name, not by count: the array length is in the return
+        // type and cannot fail. Dropping this entry is how a copy silently
+        // becomes a move, which is the one outcome this feature must not have.
+        assert!(fmts.iter().any(|f| f.cfFormat == d.preferred_effect_cf));
         for f in &fmts {
             assert!(d.serves(f), "advertised cf={} is not served", f.cfFormat);
             assert!(d.payload_for(f).is_some());
