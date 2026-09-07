@@ -30,6 +30,13 @@ use crate::window::list_windows::list_windows;
 /// Window class of every Win32 common dialog.
 const DIALOG_CLASS: &str = "#32770";
 
+/// How long a fresh dialog gets to appear before we fall back to one that was
+/// already open. Short on purpose: an agent typically screenshots, sees the
+/// dialog, and only then calls, so "already up" is the normal case. Capped by
+/// the caller's own budget, so `wait_for_dialog_ms: 0` still means "it must
+/// already be up".
+const FRESH_DIALOG_GRACE_MS: u64 = 750;
+
 /// Cross-process `SendMessageW` to a modal dialog blocks forever if its UI
 /// thread is not pumping, so every message we send is timeout-bounded.
 const SEND_TIMEOUT_MS: u32 = 500;
@@ -146,38 +153,43 @@ fn dialogs_for_pid(pid: u32) -> Result<Vec<WindowInfo>, ProtoError> {
 /// something the caller never asked about. So a dialog absent from `before`
 /// wins the moment it appears.
 ///
-/// An already-open dialog is still usable, but only once the budget is spent:
-/// `wait_for_dialog_ms: 0` means "it must already be up" (see
-/// `Request::FileDialogSet`), and the common flow — click Upload, then call —
-/// often races the dialog into existence before the request lands. Refusing a
-/// pre-existing dialog outright would break both.
+/// An already-open dialog is still usable once the grace has passed: the
+/// screenshot-then-call flow means "already up" is the normal case, and
+/// `wait_for_dialog_ms: 0` documents it outright (see `Request::FileDialogSet`).
 fn wait_for_dialog(
     pid: u32,
     before: &[u64],
     timeout_ms: u32,
 ) -> Result<WindowInfo, ProtoError> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    let started = Instant::now();
+    let grace = Duration::from_millis(FRESH_DIALOG_GRACE_MS.min(timeout_ms as u64));
+    let deadline = started + Duration::from_millis(timeout_ms as u64);
     loop {
         let open = dialogs_for_pid(pid)?;
-        if let Some(fresh) = pick_fresh(&open, before) {
-            return Ok(fresh.clone());
+        if let Some(w) = pick_dialog(&open, before, started.elapsed(), grace) {
+            return Ok(w.clone());
         }
         if Instant::now() >= deadline {
-            return match open.into_iter().next() {
-                Some(stale) => Ok(stale),
-                None => Err(ProtoError::new(
-                    ErrorCode::DialogNotFound,
-                    format!("no #32770 dialog in pid {pid} within {timeout_ms}ms"),
-                )),
-            };
+            return Err(ProtoError::new(
+                ErrorCode::DialogNotFound,
+                format!("no #32770 dialog in pid {pid} within {timeout_ms}ms"),
+            ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// The first dialog that was not already up, if any.
-fn pick_fresh<'a>(open: &'a [WindowInfo], before: &[u64]) -> Option<&'a WindowInfo> {
-    open.iter().find(|w| !before.contains(&w.hwnd))
+/// The dialog to fill: one that was not already up, or — once `waited` has
+/// reached `grace` — whichever was.
+fn pick_dialog<'a>(
+    open: &'a [WindowInfo],
+    before: &[u64],
+    waited: Duration,
+    grace: Duration,
+) -> Option<&'a WindowInfo> {
+    open.iter()
+        .find(|w| !before.contains(&w.hwnd))
+        .or_else(|| if waited >= grace { open.first() } else { None })
 }
 
 /// Watch the specific HWND we filled — not "any #32770 is gone". Save dialogs
@@ -303,16 +315,37 @@ mod tests {
         }
     }
 
+    const GRACE: Duration = Duration::from_millis(FRESH_DIALOG_GRACE_MS);
+    const EARLY: Duration = Duration::from_millis(0);
+
     #[test]
     fn a_leftover_dialog_never_wins_over_a_fresh_one() {
         let open = vec![dialog(1), dialog(2)];
         // 1 was already up when the call started: filling it would type a path
         // into a dialog the caller never asked about.
-        assert_eq!(pick_fresh(&open, &[1]).map(|w| w.hwnd), Some(2));
-        // Nothing new yet — keep waiting rather than grabbing the leftover.
-        assert!(pick_fresh(&open[..1], &[1]).is_none());
+        assert_eq!(pick_dialog(&open, &[1], EARLY, GRACE).map(|w| w.hwnd), Some(2));
+        // Nothing new yet, and the grace has not passed — keep waiting.
+        assert!(pick_dialog(&open[..1], &[1], EARLY, GRACE).is_none());
+        // Even after the grace, a fresh dialog still beats the leftover.
+        assert_eq!(pick_dialog(&open, &[1], GRACE, GRACE).map(|w| w.hwnd), Some(2));
         // No leftovers: the only dialog is the right one.
-        assert_eq!(pick_fresh(&open, &[]).map(|w| w.hwnd), Some(1));
+        assert_eq!(pick_dialog(&open, &[], EARLY, GRACE).map(|w| w.hwnd), Some(1));
+    }
+
+    #[test]
+    fn after_the_grace_an_already_open_dialog_is_used() {
+        let open = vec![dialog(1)];
+        // The screenshot-then-call flow: the dialog was up before the request
+        // landed, so waiting the whole budget for a "fresh" one would just be
+        // latency the caller pays for nothing.
+        assert_eq!(pick_dialog(&open, &[1], GRACE, GRACE).map(|w| w.hwnd), Some(1));
+        // `wait_for_dialog_ms: 0` caps the grace to zero — accept immediately.
+        assert_eq!(
+            pick_dialog(&open, &[1], EARLY, Duration::ZERO).map(|w| w.hwnd),
+            Some(1)
+        );
+        // Nothing open at all is still DialogNotFound's job, not this one's.
+        assert!(pick_dialog(&[], &[1], GRACE, GRACE).is_none());
     }
 
     #[test]
