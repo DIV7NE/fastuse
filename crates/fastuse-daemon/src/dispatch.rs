@@ -561,7 +561,7 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                     }
                     (None, None) => Ok((drop, None, None)),
                     _ => Err(Response::Error(Error::new(
-                        ErrorCode::Internal,
+                        ErrorCode::InvalidArgument,
                         "start_x and start_y must both be set or both omitted".to_string(),
                     ))),
                 },
@@ -1530,7 +1530,7 @@ mod tests {
         )
         .await;
         match r.response {
-            Response::Error(e) => assert_eq!(e.code, ErrorCode::Internal),
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::InvalidArgument),
             other => panic!("expected rejection of a lone start axis, got {other:?}"),
         }
     }

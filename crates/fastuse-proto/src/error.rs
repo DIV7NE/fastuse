@@ -84,6 +84,10 @@ pub enum ErrorCode {
     DragFailed,
     /// The de-elevated drag helper process could not be started (v2.5.0).
     HelperSpawnFailed,
+    /// The caller supplied an argument the daemon cannot act on — malformed,
+    /// contradictory, or incomplete input rather than a runtime fault. First
+    /// use: `drag_files` given exactly one of `start_x`/`start_y` (v2.5.0).
+    InvalidArgument,
 }
 
 impl ErrorCode {
@@ -120,6 +124,7 @@ impl ErrorCode {
             Self::DialogStillOpen => "DIALOG_STILL_OPEN",
             Self::DragFailed => "DRAG_FAILED",
             Self::HelperSpawnFailed => "HELPER_SPAWN_FAILED",
+            Self::InvalidArgument => "INVALID_ARGUMENT",
         }
     }
 }
