@@ -243,7 +243,17 @@ pub fn drag_files(
             format!("the drag helper's outcome is not valid JSON: {e}"),
         )
     })?;
-    let result = map_outcome(outcome)?;
+    let result = match map_outcome(outcome) {
+        Ok(r) => r,
+        Err(e) => {
+            // The error also travels back to the caller, but nothing on the
+            // daemon side logs a Response::Error, and this is the one line a
+            // post-mortem of a failed drag has to go on. Every message the
+            // helper can put here is a fixed literal or an HRESULT — no paths.
+            tracing::error!(error = %e.message, "drag_files: the helper reported a failure");
+            return Err(e);
+        }
+    };
     tracing::info!(
         dropped = result.dropped,
         effect = result.effect,
