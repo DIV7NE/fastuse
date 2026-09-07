@@ -41,15 +41,23 @@ pub fn resolve_paths_allowing_new(raw: &[String]) -> Result<Vec<PathBuf>, ProtoE
 /// The `wait_for_idle` drain between focus and keystroke is what stops
 /// Electron targets from swallowing the paste: they process the activation
 /// message asynchronously and drop input that arrives before it lands.
+///
+/// All three steps run on the input thread, not just the keystroke.
+/// `focus_window` calls `AttachThreadInput` and taps Alt via `SendInput` to
+/// establish foreground-input recency *on the calling thread*; doing that
+/// anywhere but where Ctrl+V originates leaves the lockout the tap exists to
+/// lift still in place.
 pub fn paste_into(
     input: &crate::input_thread::InputThreadHandle,
     hwnd: Option<u64>,
 ) -> Result<(), ProtoError> {
-    if let Some(h) = hwnd {
-        crate::window::focus::focus_window(h)?;
-    }
-    let _ = crate::window::wait_for_idle::wait_for_idle(hwnd, 1000)?;
-    input.run(move || crate::input::handlers::key("ctrl+v", 1))
+    input.run(move || {
+        if let Some(h) = hwnd {
+            crate::window::focus::focus_window(h)?;
+        }
+        crate::window::wait_for_idle::wait_for_idle(hwnd, 1000)?;
+        crate::input::handlers::key("ctrl+v", 1)
+    })
 }
 
 fn resolve(raw: &[String], allow_new: bool) -> Result<Vec<PathBuf>, ProtoError> {
