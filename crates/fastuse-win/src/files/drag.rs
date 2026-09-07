@@ -44,6 +44,10 @@ const READY_TIMEOUT_MS: u64 = 5_000;
 /// report our timeout instead of its far more specific reason.
 const OUTCOME_GRACE_MS: u64 = 2_000;
 
+/// The helper's readiness line, matched exactly. Written by
+/// `drag_helper::drag` as a single `writeln!` of this literal.
+const READY_LINE: &str = r#"{"ready":true}"#;
+
 /// Inset of the default start point from the monitor edge. A raw corner is
 /// the Start button or the notification area; 64px in is empty desktop on
 /// every normal layout.
@@ -103,6 +107,7 @@ pub fn drag_files(
         }
     };
 
+    let spawned = Instant::now();
     let exe = std::env::current_exe().map_err(|e| {
         ProtoError::new(
             ErrorCode::HelperSpawnFailed,
@@ -112,6 +117,15 @@ pub fn drag_files(
     // Guarded from here on: an early return past this point must not leave a
     // helper holding a 1x1 window and an OLE modal loop on the user's desktop.
     let mut helper = HelperGuard(spawn_medium_il(&exe, &["--drag-helper".to_string()])?);
+    tracing::info!(
+        path_count = resolved.len(),
+        helper_pid = helper.0.pid(),
+        start_x = sx,
+        start_y = sy,
+        x,
+        y,
+        "drag_files: helper spawned"
+    );
 
     // The helper's stdout is a blocking anonymous pipe with no read timeout,
     // so it is drained on its own thread and delivered over a channel we can
@@ -158,7 +172,10 @@ pub fn drag_files(
     // Until this line arrives the 1x1 source window does not exist, and a
     // button-down would land on whatever the user had under the cursor.
     match rx.recv_timeout(Duration::from_millis(READY_TIMEOUT_MS)) {
-        Ok(l) if l.contains("\"ready\"") => {}
+        // Exact, not a substring: a helper *error* string that happens to
+        // contain the literal would otherwise be read as readiness, and the
+        // daemon answers readiness with a real click on the user's desktop.
+        Ok(l) if is_ready(&l) => {}
         // The helper prints exactly one outcome line on every failure path,
         // so anything else here is that line: it failed before it was ready.
         Ok(l) => return Err(early_failure(&l)),
@@ -177,6 +194,7 @@ pub fn drag_files(
     }
 
     let started = Instant::now();
+    tracing::debug!(ready_wait_ms = started.duration_since(spawned).as_millis() as u64, "drag_files: helper ready");
     {
         // A guard, not a line at the bottom of the happy path: written as a
         // trailing statement it stops running the first time someone adds an
@@ -186,16 +204,24 @@ pub fn drag_files(
         // helper is killed. So the daemon injects the down, and the button-up
         // is owned by scope exit — success, error, or panic.
         let _up = ReleaseGuard(|| {
-            let _ = input.run(|| {
+            if let Err(e) = input.run(|| {
                 release_left_button();
                 Ok(())
-            });
+            }) {
+                // D-26 forbids injecting from this thread, so there is no
+                // fallback — but the user's mouse button is now physically
+                // down with no other trace of why.
+                tracing::error!(error = ?e, "drag_files: the left-button release was NOT injected");
+            }
         });
         press_at(input, sx, sy)?;
         walk_to(input, sx, sy, x, y)?;
     }
 
-    let budget = u64::from(remaining_ms(DRAG_DEADLINE_MS, started.elapsed())) + OUTCOME_GRACE_MS;
+    let injected = started.elapsed();
+    tracing::debug!(walk_ms = injected.as_millis() as u64, "drag_files: cursor walk done, button released");
+
+    let budget = u64::from(remaining_ms(DRAG_DEADLINE_MS, injected)) + OUTCOME_GRACE_MS;
     let line = match rx.recv_timeout(Duration::from_millis(budget)) {
         Ok(l) => l,
         Err(RecvTimeoutError::Disconnected) => {
@@ -217,7 +243,14 @@ pub fn drag_files(
             format!("the drag helper's outcome is not valid JSON: {e}"),
         )
     })?;
-    Ok(map_outcome(outcome))
+    let result = map_outcome(outcome);
+    tracing::info!(
+        dropped = result.dropped,
+        effect = result.effect,
+        total_ms = started.elapsed().as_millis() as u64,
+        "drag_files: outcome"
+    );
+    Ok(result)
 }
 
 /// Kills the helper on every exit path. A helper that outlives the call keeps
@@ -327,6 +360,11 @@ fn map_outcome(o: DragOutcome) -> DragResult {
         dropped: o.dropped && o.effect != 0,
         effect: o.effect,
     }
+}
+
+/// Is `line` the helper's readiness line?
+fn is_ready(line: &str) -> bool {
+    line.trim() == READY_LINE
 }
 
 /// The helper printed its outcome line instead of `{"ready":true}`.
@@ -488,6 +526,20 @@ mod tests {
         }
         assert!(walk_that_fails().is_err());
         assert_eq!(FIRED.load(Ordering::SeqCst), 1, "the button-up never ran");
+    }
+
+    #[test]
+    fn only_the_exact_ready_line_is_readiness() {
+        // Exactly what drag_helper::drag writes, minus the newline lines()
+        // already stripped.
+        assert!(is_ready(r#"{"ready":true}"#));
+        assert!(is_ready("{\"ready\":true}\r"));
+        // A helper error that merely mentions the literal must not be read as
+        // readiness: the daemon answers readiness with a real mouse click.
+        assert!(!is_ready(
+            r#"{"dropped":false,"effect":0,"error":"no {\"ready\":true} was sent"}"#
+        ));
+        assert!(!is_ready(r#"{"ready":false}"#));
     }
 
     #[test]
