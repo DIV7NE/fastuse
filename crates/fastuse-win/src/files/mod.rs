@@ -9,6 +9,7 @@
 //! quietly discards.
 
 pub mod dialog;
+pub mod hdrop;
 
 use std::path::PathBuf;
 
