@@ -352,6 +352,26 @@ enum Cmd {
         /// Text to write.
         text: String,
     },
+    /// Fill and submit a native file dialog.
+    FileDialogSet {
+        /// Absolute paths to place in the filename field.
+        paths: Vec<String>,
+        /// Scope discovery to this window's process.
+        #[arg(long)]
+        hwnd: Option<u64>,
+        /// Budget for the dialog to appear, ms.
+        #[arg(long, default_value_t = 5000)]
+        wait_for_dialog_ms: u32,
+        /// Budget for the dialog to close after submit, ms.
+        #[arg(long, default_value_t = 5000)]
+        wait_for_close_ms: u32,
+        /// Fill the field but do not press Enter.
+        #[arg(long)]
+        fill_only: bool,
+        /// Allow a path that does not exist yet (Save dialogs).
+        #[arg(long)]
+        allow_new: bool,
+    },
     /// Run a shell command (permission-gated).
     ShellExec {
         /// Command line.
@@ -877,6 +897,15 @@ fn main() {
             // ---- Phase 4 ----
             Cmd::ClipboardGetText => cmd_phase4::clipboard_get_text(&identity.path).await,
             Cmd::ClipboardSetText { text } => cmd_phase4::clipboard_set_text(&identity.path, text).await,
+            Cmd::FileDialogSet {
+                paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only, allow_new,
+            } => {
+                cmd_phase4::file_dialog_set(
+                    &identity.path, paths, hwnd, wait_for_dialog_ms, wait_for_close_ms,
+                    !fill_only, allow_new,
+                )
+                .await
+            }
             Cmd::ShellExec { command, shell, cwd, timeout_ms } => {
                 cmd_phase4::shell_exec(&identity.path, command, shell.as_deref(), cwd, timeout_ms).await
             }

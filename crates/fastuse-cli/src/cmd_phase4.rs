@@ -79,6 +79,43 @@ pub async fn clipboard_set_text(pipe_path: &str, text: String) -> anyhow::Result
     }
 }
 
+pub async fn file_dialog_set(
+    pipe_path: &str,
+    paths: Vec<String>,
+    hwnd: Option<u64>,
+    wait_for_dialog_ms: u32,
+    wait_for_close_ms: u32,
+    submit: bool,
+    allow_new: bool,
+) -> anyhow::Result<()> {
+    let req = Request::FileDialogSet {
+        paths: Redact::new(paths),
+        hwnd,
+        wait_for_dialog_ms,
+        wait_for_close_ms,
+        submit,
+        allow_new,
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::FileDialog(r) => {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "dialog_hwnd": r.dialog_hwnd,
+                    "closed": r.closed,
+                    "fill_method": r.fill_method,
+                    "follow_up_dialogs": r.follow_up_dialogs.len(),
+                })
+            );
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 pub async fn shell_exec(
     pipe_path: &str,
     command: String,
