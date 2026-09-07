@@ -222,6 +222,12 @@ pub fn drag_files(
 
 /// Kills the helper on every exit path. A helper that outlives the call keeps
 /// a visible (if 1x1) window and, mid-drag, mouse capture.
+///
+/// This kill is also the only thing that unblocks the stdout reader thread on
+/// the timeout paths: it is parked in `read`, and nothing but the child's exit
+/// closes the write end. Making this a no-op — on the assumption that a helper
+/// which has printed its outcome exits by itself — leaks a thread per timed-out
+/// drag.
 struct HelperGuard(MediumIlChild);
 
 impl Drop for HelperGuard {
