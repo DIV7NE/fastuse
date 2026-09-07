@@ -39,7 +39,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA,
-    COINIT_APARTMENTTHREADED, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
+    COINIT_APARTMENTTHREADED, DATADIR_GET, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0,
+    TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
@@ -48,7 +49,7 @@ use windows::Win32::System::Ole::{
     DROPEFFECT, DROPEFFECT_COPY,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
-use windows::Win32::UI::Shell::CFSTR_PREFERREDDROPEFFECT;
+use windows::Win32::UI::Shell::{SHCreateStdEnumFmtEtc, CFSTR_PREFERREDDROPEFFECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW,
     SetLayeredWindowAttributes, TranslateMessage, LWA_ALPHA, MSG, PM_REMOVE, WM_LBUTTONDOWN,
@@ -357,6 +358,18 @@ impl HdropData {
             Some(DROPEFFECT_COPY.0.to_le_bytes().to_vec())
         }
     }
+
+    /// The formats `EnumFormatEtc` advertises: exactly what `serves` accepts.
+    fn enumerable_formats(&self) -> [FORMATETC; 2] {
+        let one = |cf: u16| FORMATETC {
+            cfFormat: cf,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        [one(CF_HDROP.0), one(self.preferred_effect_cf)]
+    }
 }
 
 impl IDataObject_Impl for HdropData_Impl {
@@ -405,11 +418,17 @@ impl IDataObject_Impl for HdropData_Impl {
         Err(windows_core::Error::from_hresult(E_NOTIMPL))
     }
 
-    fn EnumFormatEtc(&self, _dir: u32) -> windows_core::Result<IEnumFORMATETC> {
-        // Both known targets (Explorer, Chromium) call QueryGetData, not
-        // EnumFormatEtc. Implement IEnumFORMATETC over the two entries only if
-        // a real target is found to refuse the drop without it.
-        Err(windows_core::Error::from_hresult(E_NOTIMPL))
+    fn EnumFormatEtc(&self, dir: u32) -> windows_core::Result<IEnumFORMATETC> {
+        // Explorer's folder drop target enumerates before it decides, and a
+        // source it cannot enumerate is answered with DROPEFFECT_NONE — the
+        // drop reaches us as DRAGDROP_S_DROP with effect 0 and nothing lands.
+        // QueryGetData alone is not enough, whatever the docs imply.
+        if dir != DATADIR_GET.0 as u32 {
+            return Err(windows_core::Error::from_hresult(E_NOTIMPL));
+        }
+        let fmts = self.enumerable_formats();
+        // SAFETY: `fmts` outlives the call; the shell copies the array.
+        unsafe { SHCreateStdEnumFmtEtc(&fmts) }
     }
 
     fn DAdvise(
@@ -450,6 +469,21 @@ fn alloc_hglobal(bytes: &[u8]) -> windows_core::Result<HGLOBAL> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_advertised_format_is_one_the_object_actually_serves() {
+        // Explorer enumerates before it decides: an advertised format the
+        // object then refuses, or a served format left out of the list, both
+        // end as a drop with DROPEFFECT_NONE.
+        let d = HdropData::new(&[r"C:\Windows\win.ini".to_string()]).unwrap();
+        let fmts = d.enumerable_formats();
+        assert_eq!(fmts.len(), 2);
+        assert!(fmts.iter().any(|f| f.cfFormat == CF_HDROP.0));
+        for f in &fmts {
+            assert!(d.serves(f), "advertised cf={} is not served", f.cfFormat);
+            assert!(d.payload_for(f).is_some());
+        }
+    }
 
     #[test]
     fn job_and_outcome_round_trip() {

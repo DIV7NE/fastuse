@@ -21,7 +21,8 @@ use fastuse_proto::{Error as ProtoError, ErrorCode};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TokenPrimary, SECURITY_ATTRIBUTES,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
+    TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
@@ -111,14 +112,12 @@ pub fn spawn_medium_il(exe: &Path, args: &[String]) -> Result<MediumIlChild, Pro
         .map_err(|e| win_err("OpenProcessToken(explorer.exe)", &e))?;
     let shell_token = own(shell_token);
 
-    // CreateProcessWithTokenW documents TOKEN_QUERY, TOKEN_DUPLICATE and
-    // TOKEN_ASSIGN_PRIMARY as the required rights on the primary token.
     let mut primary = HANDLE::default();
     // SAFETY: `shell_token` is live for the call; `primary` is a live local.
     unsafe {
         DuplicateTokenEx(
             raw(&shell_token),
-            TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+            SECLOGON_TOKEN_RIGHTS,
             None,
             SecurityImpersonation,
             TokenPrimary,
@@ -215,6 +214,23 @@ pub fn spawn_medium_il(exe: &Path, args: &[String]) -> Result<MediumIlChild, Pro
     })
 }
 
+/// Rights the duplicated primary token must carry for `CreateProcessWithTokenW`.
+///
+/// The documentation lists only `TOKEN_QUERY | TOKEN_DUPLICATE |
+/// TOKEN_ASSIGN_PRIMARY`. That set fails with `ERROR_ACCESS_DENIED`: the
+/// Secondary Logon service also re-duplicates the token and stamps the target
+/// session onto it, so it needs `TOKEN_ADJUST_DEFAULT` and
+/// `TOKEN_ADJUST_SESSIONID` as well. Measured on this API: the documented
+/// three, plus either adjust right alone, all return 0x80070005; only both
+/// together succeed.
+const SECLOGON_TOKEN_RIGHTS: TOKEN_ACCESS_MASK = TOKEN_ACCESS_MASK(
+    TOKEN_ASSIGN_PRIMARY.0
+        | TOKEN_DUPLICATE.0
+        | TOKEN_QUERY.0
+        | TOKEN_ADJUST_DEFAULT.0
+        | TOKEN_ADJUST_SESSIONID.0,
+);
+
 /// Process id behind the shell window.
 ///
 /// Split out from [`spawn_medium_il`] so the "shell is not running" branch is
@@ -292,6 +308,13 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_token_mask_keeps_the_two_undocumented_seclogon_rights() {
+        // Trimming this back to the three documented rights makes every spawn
+        // fail with ERROR_ACCESS_DENIED. 0x18b is the measured minimum.
+        assert_eq!(SECLOGON_TOKEN_RIGHTS.0, 0x0000_018b);
+    }
 
     #[test]
     fn a_null_shell_window_is_a_spawn_failure_not_a_fallback() {
