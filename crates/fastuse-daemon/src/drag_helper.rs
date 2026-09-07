@@ -128,6 +128,18 @@ fn drag(job: &DragJob) -> DragOutcome {
         return DragOutcome::failed(format!("OleInitialize failed: {e}"));
     }
 
+    // Build the payload before the window exists, so an unusable job fails
+    // before the ready line and therefore before the daemon injects a real
+    // mouse click onto the user's desktop.
+    let data = match HdropData::new(&job.paths) {
+        Ok(d) => IDataObject::from(d),
+        Err(e) => {
+            // SAFETY: OleInitialize succeeded above.
+            unsafe { OleUninitialize() };
+            return DragOutcome::failed(e);
+        }
+    };
+
     let hwnd = match create_source_window(job.start_x, job.start_y) {
         Ok(h) => h,
         Err(e) => {
@@ -144,7 +156,7 @@ fn drag(job: &DragJob) -> DragOutcome {
         let _ = out.flush();
     }
 
-    let outcome = pump_until_drag(job);
+    let outcome = pump_until_drag(job, &data);
 
     // SAFETY: `hwnd` was created on this thread and is still alive.
     let _ = unsafe { DestroyWindow(hwnd) };
@@ -159,7 +171,7 @@ fn drag(job: &DragJob) -> DragOutcome {
 /// Calling `DoDragDrop` from the button-down the window actually received —
 /// rather than blindly after the injection — is the sequence the API is built
 /// around, and it makes the mouse-capture handoff correct by construction.
-fn pump_until_drag(job: &DragJob) -> DragOutcome {
+fn pump_until_drag(job: &DragJob, data: &IDataObject) -> DragOutcome {
     let deadline = Instant::now() + Duration::from_millis(u64::from(job.deadline_ms));
     let mut msg = MSG::default();
     loop {
@@ -167,7 +179,7 @@ fn pump_until_drag(job: &DragJob) -> DragOutcome {
         // message posted to this thread.
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_LBUTTONDOWN {
-                return do_drag(job, deadline);
+                return do_drag(data, deadline);
             }
             // SAFETY: `msg` was just filled by PeekMessageW.
             unsafe {
@@ -184,16 +196,12 @@ fn pump_until_drag(job: &DragJob) -> DragOutcome {
     }
 }
 
-fn do_drag(job: &DragJob, deadline: Instant) -> DragOutcome {
-    let data: IDataObject = match HdropData::new(&job.paths) {
-        Ok(d) => d.into(),
-        Err(e) => return DragOutcome::failed(e),
-    };
+fn do_drag(data: &IDataObject, deadline: Instant) -> DragOutcome {
     let source: IDropSource = DragSource { deadline }.into();
     let mut effect = DROPEFFECT_COPY;
     // SAFETY: both interfaces are live for the duration of the modal call,
     // which returns before they are dropped.
-    let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+    let hr = unsafe { DoDragDrop(data, &source, DROPEFFECT_COPY, &mut effect) };
     if hr == DRAGDROP_S_DROP {
         DragOutcome {
             dropped: true,
@@ -463,6 +471,49 @@ mod tests {
             r#"{"paths":["C:\\Windows\\win.ini"],"start_x":400,"start_y":400,"deadline_ms":10000}"#;
         let job: DragJob = serde_json::from_str(line).unwrap();
         assert_eq!(job.paths, vec![r"C:\Windows\win.ini".to_string()]);
+    }
+
+    /// The ownership contract `GetData` has to honour: a fresh HGLOBAL every
+    /// call, because the consumer's ReleaseStgMedium frees it. Reusing one
+    /// stored handle would be a double free, and this is the only test that
+    /// drives the real COM entry point.
+    #[test]
+    fn get_data_allocates_a_fresh_hglobal_every_call() {
+        let obj = IDataObject::from(HdropData::new(&[r"C:\Windows\win.ini".to_string()]).unwrap());
+        let fmt = FORMATETC {
+            cfFormat: CF_HDROP.0,
+            tymed: TYMED_HGLOBAL.0 as u32,
+            ..Default::default()
+        };
+        // SAFETY: `obj` is live and `fmt` is a live local.
+        let (a, b) = unsafe { (obj.GetData(&fmt).unwrap(), obj.GetData(&fmt).unwrap()) };
+        assert_eq!(a.tymed, TYMED_HGLOBAL.0 as u32);
+        // SAFETY: the union is HGLOBAL because tymed says TYMED_HGLOBAL.
+        let (ha, hb) = unsafe { (a.u.hGlobal, b.u.hGlobal) };
+        assert!(
+            !ha.is_invalid() && !hb.is_invalid(),
+            "GetData returned a null HGLOBAL"
+        );
+        assert_ne!(
+            ha.0, hb.0,
+            "two calls handed back the same HGLOBAL: a double free"
+        );
+        // SAFETY: we own both; nothing else has taken them. GlobalFree returns
+        // NULL on success, which the binding reports as an Err, so the result
+        // is not a useful signal here.
+        unsafe {
+            let _ = GlobalFree(Some(ha));
+            let _ = GlobalFree(Some(hb));
+        }
+
+        // And an unserved format is refused rather than allocated.
+        let text = FORMATETC {
+            cfFormat: 1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+            ..Default::default()
+        };
+        // SAFETY: as above.
+        assert!(unsafe { obj.GetData(&text) }.is_err());
     }
 
     #[test]

@@ -67,7 +67,9 @@ fn main() {
     // Medium-integrity drag-source mode. This must precede Args::parse (clap
     // rejects the flag), the singleton, the sentinel and the pipe: the helper
     // is the same binary re-executed, and it must never try to be the daemon.
-    if std::env::args().any(|a| a == "--drag-helper") {
+    // Matched at argv[1] exactly, which is the only shape spawn_medium_il
+    // produces: a loose scan would divert `--allow --drag-helper` here.
+    if std::env::args().nth(1).as_deref() == Some("--drag-helper") {
         return drag_helper::run();
     }
 

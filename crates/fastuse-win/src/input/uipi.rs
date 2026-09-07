@@ -25,7 +25,7 @@ use fastuse_proto::{Error as ProtoError, ErrorCode};
 
 const SECURITY_MANDATORY_UNTRUSTED_RID: u32 = 0x0000_0000;
 const SECURITY_MANDATORY_LOW_RID: u32 = 0x0000_1000;
-const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x0000_2000;
+pub(crate) const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x0000_2000;
 const SECURITY_MANDATORY_HIGH_RID: u32 = 0x0000_3000;
 const SECURITY_MANDATORY_SYSTEM_RID: u32 = 0x0000_4000;
 
@@ -56,7 +56,7 @@ fn read_self_integrity() -> Result<u32, ()> {
     res
 }
 
-fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
+pub(crate) fn read_token_integrity(token: HANDLE) -> Result<u32, ()> {
     // First call: get required size.
     let mut needed: u32 = 0;
     // SAFETY: passing None length pointer + None buffer to query the size.

@@ -128,6 +128,31 @@ pub fn spawn_medium_il(exe: &Path, args: &[String]) -> Result<MediumIlChild, Pro
     .map_err(|e| win_err("DuplicateTokenEx", &e))?;
     let primary = own(primary);
 
+    // Confirm the borrowed token really is Medium or below before spawning
+    // with it. `explorer.exe` runs at High integrity when UAC is off or under
+    // the built-in Administrator account, and a High-IL "de-elevated" child is
+    // the silent higher-privilege fallback this whole module exists to avoid:
+    // the drag would die inside the OLE callback with no diagnostic. Also
+    // bounds the pid-recycle window between GetShellWindow and OpenProcess.
+    match crate::input::uipi::read_token_integrity(raw(&primary)) {
+        Ok(rid) if rid <= crate::input::uipi::SECURITY_MANDATORY_MEDIUM_RID => {}
+        Ok(rid) => {
+            return Err(ProtoError::new(
+                ErrorCode::HelperSpawnFailed,
+                format!(
+                    "the shell token is at integrity RID 0x{rid:04x}, above medium (0x{:04x});                      explorer.exe is not running de-elevated on this machine (UAC disabled, or                      the built-in Administrator account), so there is no medium-integrity token                      to borrow",
+                    crate::input::uipi::SECURITY_MANDATORY_MEDIUM_RID
+                ),
+            ))
+        }
+        Err(()) => {
+            return Err(ProtoError::new(
+                ErrorCode::HelperSpawnFailed,
+                "could not read the integrity level of the borrowed shell token".to_string(),
+            ))
+        }
+    }
+
     // Both pipes are created inheritable. Inheritance is not actually what
     // moves them: CreateProcessWithTokenW creates the process through the
     // Secondary Logon service, which is not the child's parent, so it
@@ -176,11 +201,14 @@ pub fn spawn_medium_il(exe: &Path, args: &[String]) -> Result<MediumIlChild, Pro
     drop(child_stdout);
     created.map_err(|e| win_err("CreateProcessWithTokenW", &e))?;
 
-    // SAFETY: CreateProcessWithTokenW returned both handles to us.
-    unsafe { CloseHandle(pi.hThread) }.map_err(|e| win_err("CloseHandle(hThread)", &e))?;
+    // Adopt hProcess before anything that can fail, or an error here leaks it.
+    let process = own(pi.hProcess);
+    // SAFETY: CreateProcessWithTokenW returned this handle to us and we never
+    // use the thread.
+    let _ = unsafe { CloseHandle(pi.hThread) };
 
     Ok(MediumIlChild {
-        process: own(pi.hProcess),
+        process,
         pid: pi.dwProcessId,
         stdin: File::from(our_stdin),
         stdout: File::from(our_stdout),
