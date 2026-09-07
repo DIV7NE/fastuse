@@ -788,6 +788,16 @@ pub struct ClipboardSetTextArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClipboardSetFilesArgs {
+    /// Absolute paths to place on the clipboard as a file list.
+    pub paths: Vec<String>,
+    /// Send Ctrl+V to the target after copying. Default false.
+    pub paste: Option<bool>,
+    /// Window to focus before pasting. Omit to use the foreground window.
+    pub hwnd: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct FileDialogSetArgs {
     /// Absolute paths to put in the dialog's filename field.
     pub paths: Vec<String>,
@@ -1271,6 +1281,31 @@ impl Fastuse {
     #[tool(name = "clipboard_set_text", description = "Write text to the clipboard. Payload is wrapped in Redact<> end-to-end.")]
     async fn clipboard_set_text(&self, Parameters(args): Parameters<ClipboardSetTextArgs>) -> Result<Json<AckOutput>, McpError> {
         let req = Request::ClipboardSet { req: fastuse_proto::ClipboardSet::Text(Redact::new(args.text)), opts: None };
+        match self.call(req).await? {
+            Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(
+        name = "clipboard_set_files",
+        description = "Put files on the clipboard as a file list (CF_HDROP), optionally pasting them into a \
+                       window with Ctrl+V. Works in Discord, Slack, Explorer, most Electron apps, and many \
+                       web drop zones. Permission-gated (Confirmed tier)."
+    )]
+    async fn clipboard_set_files(
+        &self,
+        Parameters(args): Parameters<ClipboardSetFilesArgs>,
+    ) -> Result<Json<AckOutput>, McpError> {
+        let req = Request::ClipboardSet {
+            req: fastuse_proto::ClipboardSet::Files {
+                paths: Redact::new(args.paths),
+                paste: args.paste.unwrap_or(false),
+                hwnd: args.hwnd,
+            },
+            opts: None,
+        };
         match self.call(req).await? {
             Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
             Response::Error(e) => Err(Self::err_from_proto(e)),

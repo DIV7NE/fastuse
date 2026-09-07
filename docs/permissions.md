@@ -21,6 +21,7 @@ Three ways, in priority order:
 - `shell_exec` — arbitrary command execution
 - `clipboard_set_text` — overwrites user's clipboard
 - `clipboard_set_image` — same
+- `clipboard_set_files` — overwrites the user's clipboard with a file list
 
 Override the default list with `[permissions] gated_tools = ["..."]` in config.
 

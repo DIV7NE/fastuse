@@ -79,6 +79,26 @@ pub async fn clipboard_set_text(pipe_path: &str, text: String) -> anyhow::Result
     }
 }
 
+pub async fn clipboard_set_files(
+    pipe_path: &str,
+    paths: Vec<String>,
+    paste: bool,
+    hwnd: Option<u64>,
+) -> anyhow::Result<()> {
+    let req = Request::ClipboardSet {
+        req: ClipboardSet::Files { paths: Redact::new(paths), paste, hwnd },
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::ClipboardSet => {
+            println!("{}", json!({"ok": true}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 pub async fn file_dialog_set(
     pipe_path: &str,
     paths: Vec<String>,

@@ -352,6 +352,17 @@ enum Cmd {
         /// Text to write.
         text: String,
     },
+    /// Put files on the clipboard as CF_HDROP (permission-gated).
+    ClipboardSetFiles {
+        /// Absolute paths.
+        paths: Vec<String>,
+        /// Send Ctrl+V after copying.
+        #[arg(long)]
+        paste: bool,
+        /// Window to focus before pasting.
+        #[arg(long)]
+        hwnd: Option<u64>,
+    },
     /// Fill and submit a native file dialog.
     FileDialogSet {
         /// Absolute paths to place in the filename field.
@@ -897,6 +908,9 @@ fn main() {
             // ---- Phase 4 ----
             Cmd::ClipboardGetText => cmd_phase4::clipboard_get_text(&identity.path).await,
             Cmd::ClipboardSetText { text } => cmd_phase4::clipboard_set_text(&identity.path, text).await,
+            Cmd::ClipboardSetFiles { paths, paste, hwnd } => {
+                cmd_phase4::clipboard_set_files(&identity.path, paths, paste, hwnd).await
+            }
             Cmd::FileDialogSet {
                 paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only, allow_new,
             } => {
