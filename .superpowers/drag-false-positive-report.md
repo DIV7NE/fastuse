@@ -122,9 +122,14 @@ effect, so the source genuinely cannot know whether the target committed a copy.
 `drag_files` now reports **which window received the drop**, so the caller can
 check it against the window it aimed at.
 
-- `fastuse-proto` - `DragResult` gains `drop_target: Option<WindowInfo>`, with
-  `#[serde(default)]` so a version-skewed daemon/client pair still decodes (the
-  `Eq` derive is dropped because `WindowInfo` is only `PartialEq`).
+- `fastuse-proto` - `DragResult` gains `drop_target: Option<WindowInfo>` (the
+  `Eq` derive is dropped because `WindowInfo` is only `PartialEq`). Note this
+  is a **breaking wire change**: frames are postcard, which is not
+  self-describing, so field presence is positional and `#[serde(default)]`
+  buys nothing on this wire — a client out of step with the daemon fails to
+  decode, closed rather than silently wrong. An earlier draft of this report
+  and of the field's doc comment claimed skew tolerance; that was wrong and
+  has been corrected.
 - `fastuse-win/src/files/drag.rs` - a new `window_at(x, y)`
   (`WindowFromPoint` + `GetAncestor(GA_ROOT)`) sampled **inside** the
   held-button scope, right after the cursor walk and before `ReleaseGuard`

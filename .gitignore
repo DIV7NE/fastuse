@@ -21,3 +21,6 @@ desktop.ini
 .env
 .env.local
 *.local
+
+# Superpowers scratch workspace (ledgers, briefs, review packages)
+.superpowers/

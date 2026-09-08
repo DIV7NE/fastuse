@@ -22,6 +22,13 @@
 - `clipboard_set_files` publishes `CFSTR_PREFERREDDROPEFFECT` as
   `DROPEFFECT_COPY` alongside the file list. Without it Explorer treats a pasted
   list as a move and the source file disappears from its original location.
+- `drag_files` reports `drop_target`: the top-level window that actually
+  received the drop, sampled with the mouse button still down. OLE gives a drag
+  source no completion signal, so `dropped: true` means a target accepted the
+  data — not that it was the target you aimed at, and not that a copy committed.
+  A maximized browser sitting over the drop point will accept a file and open it
+  in a tab, which is indistinguishable from success without this field. Compare
+  it against the window you aimed at.
 - `ErrorCode::InvalidArgument`, plus `FileNotFound`, `DialogNotFound`,
   `DialogStillOpen`, `DragFailed` and `HelperSpawnFailed`. A malformed argument
   no longer reports as `Internal`, which told a caller the daemon had broken

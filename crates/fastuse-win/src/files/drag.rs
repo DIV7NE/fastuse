@@ -610,15 +610,17 @@ mod tests {
         // SAFETY: `r` is a live local; `desktop` is always a valid HWND.
         unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(desktop, &mut r) }.unwrap();
         let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-        if let Some(h) = window_at(cx, cy) {
-            // SAFETY: `h` came from the window manager moments ago.
-            assert!(unsafe { IsWindow(Some(h)) }.as_bool());
-            // GA_ROOT is idempotent, so a second climb must not move.
-            assert_eq!(window_at(cx, cy).map(|x| x.0), Some(h.0));
-            // SAFETY: `h` is live.
-            let parent = unsafe { GetAncestor(h, GA_ROOT) };
-            assert_eq!(parent.0, h.0, "window_at returned a child, not a root");
-        }
+        // Not `if let`: the desktop always covers its own centre (Progman at
+        // minimum), so a `None` here is `window_at` being broken, and a test
+        // that skips itself on the failure it exists to catch catches nothing.
+        let h = window_at(cx, cy).expect("nothing under the centre of the desktop");
+        // SAFETY: `h` came from the window manager moments ago.
+        assert!(unsafe { IsWindow(Some(h)) }.as_bool());
+        // GA_ROOT is idempotent, so a second climb must not move.
+        assert_eq!(window_at(cx, cy).map(|x| x.0), Some(h.0));
+        // SAFETY: `h` is live.
+        let parent = unsafe { GetAncestor(h, GA_ROOT) };
+        assert_eq!(parent.0, h.0, "window_at returned a child, not a root");
     }
 
     #[test]

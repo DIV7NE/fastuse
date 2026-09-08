@@ -925,10 +925,16 @@ pub struct DragResult {
     /// brought forward, which is the same answer whether or not it was the
     /// intended one.
     ///
-    /// `None` when no window covered the point, or when it had gone by the
-    /// time its details were read. Defaulted so a daemon older than the
-    /// client still decodes (v2.5.1).
-    #[serde(default)]
+    /// `None` when the window had already gone by the time its details were
+    /// read — on a live desktop no pixel is uncovered, so a bare point is not
+    /// a case that arises in practice.
+    ///
+    /// Added in v2.5.1, and adding it was a **breaking wire change**: frames
+    /// are postcard (see [`encode_frame`]), which is not self-describing, so
+    /// field presence is positional and `#[serde(default)]` would buy nothing
+    /// here. A client one version out of step with the daemon fails to decode
+    /// — closed, not silently wrong — so appending another field to any
+    /// postcard type on this wire needs a matching daemon, not an attribute.
     pub drop_target: Option<crate::coords::WindowInfo>,
 }
 
