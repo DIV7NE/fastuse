@@ -255,9 +255,42 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             let tool = match &s {
                 ClipboardSet::Text(_) => "clipboard_set_text",
                 ClipboardSet::Image { .. } => "clipboard_set_image",
+                ClipboardSet::Files { .. } => "clipboard_set_files",
+            };
+            // Captured before `s` moves into the gate. `None` means no paste.
+            let paste_target = match &s {
+                ClipboardSet::Files { paste: true, hwnd, .. } => Some(*hwnd),
+                _ => None,
             };
             let inner = gate_then(tool, None, ctx, move |_| {
                 let w = Instant::now();
+                // Resolution happens here, not in `clipboard_set`: its
+                // `FastuseError` cannot carry `ErrorCode::FileNotFound`, and
+                // resolving first means a bad path never empties the
+                // user's clipboard.
+                let s = match s {
+                    ClipboardSet::Files { paths, paste, hwnd } => {
+                        match fastuse_win::files::resolve_paths(paths.as_inner()) {
+                            Ok(resolved) => ClipboardSet::Files {
+                                paths: fastuse_proto::Redact::new(
+                                    resolved
+                                        .iter()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .collect(),
+                                ),
+                                paste,
+                                hwnd,
+                            },
+                            Err(e) => {
+                                return (
+                                    Ok(Response::Error(e)),
+                                    w.elapsed().as_micros() as i64,
+                                );
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 let r = fastuse_win::clipboard::clipboard_set(s);
                 (
                     r.map(|_| Response::ClipboardSet),
@@ -266,6 +299,20 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
             })
             .await
             .into_response_or_err(&mut win32_us);
+            // Paste only after the publish actually succeeded.
+            let inner = match (paste_target, &inner) {
+                (Some(hwnd), Response::ClipboardSet) => match ctx.input.as_ref() {
+                    Some(input) => match fastuse_win::files::paste_into(input, hwnd) {
+                        Ok(()) => inner,
+                        Err(e) => Response::Error(paste_failed_after_publish(e)),
+                    },
+                    None => Response::Error(paste_failed_after_publish(Error::new(
+                        ErrorCode::Internal,
+                        "input thread unavailable".to_string(),
+                    ))),
+                },
+                _ => inner,
+            };
             finalize(inner, opts, ctx)
         }
         Request::ShellExec(se) => {
@@ -471,6 +518,80 @@ pub async fn handle(req: Request, ctx: &DispatchCtx) -> DispatchResult {
                         "increase timeout_ms or verify the process name/title substring",
                     ),
                 ),
+            }
+        }
+        Request::FileDialogSet {
+            paths,
+            hwnd,
+            wait_for_dialog_ms,
+            wait_for_close_ms,
+            submit,
+            allow_new,
+            opts,
+        } => {
+            let inner = match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+                (Some(uia), Some(input)) => {
+                    let w_start = Instant::now();
+                    let r = fastuse_win::files::dialog::file_dialog_set(
+                        uia,
+                        input,
+                        paths.into_inner(),
+                        hwnd,
+                        wait_for_dialog_ms,
+                        wait_for_close_ms,
+                        submit,
+                        allow_new,
+                    );
+                    win32_us = w_start.elapsed().as_micros() as i64;
+                    r.map(Response::FileDialog).unwrap_or_else(Response::Error)
+                }
+                _ => Response::Error(Error::new(
+                    ErrorCode::Internal,
+                    "uia pool or input thread unavailable".to_string(),
+                )),
+            };
+            finalize(inner, opts, ctx)
+        }
+        Request::DragFiles { paths, x, y, start_x, start_y, coordinates_native, opts } => {
+            let resolved = resolve_coord(&ctx.scale, [x, y], coordinates_native).and_then(
+                |drop| match (start_x, start_y) {
+                    (Some(sx), Some(sy)) => {
+                        resolve_coord(&ctx.scale, [sx, sy], coordinates_native)
+                            .map(|s| (drop, Some(s.x), Some(s.y)))
+                    }
+                    (None, None) => Ok((drop, None, None)),
+                    _ => Err(Response::Error(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "start_x and start_y must both be set or both omitted".to_string(),
+                    ))),
+                },
+            );
+            match resolved {
+                Err(resp) => resp,
+                Ok((drop, start_x, start_y)) => {
+                    let inner = gate_then("drag_files", None, ctx, move |c| {
+                        let w = Instant::now();
+                        let r = match c.input.as_ref() {
+                            Some(input) => fastuse_win::files::drag::drag_files(
+                                input,
+                                paths.into_inner(),
+                                drop.x,
+                                drop.y,
+                                start_x,
+                                start_y,
+                            )
+                            .map_or_else(Response::Error, Response::Drag),
+                            None => Response::Error(Error::new(
+                                ErrorCode::Internal,
+                                "input thread unavailable".to_string(),
+                            )),
+                        };
+                        (Ok(r), w.elapsed().as_micros() as i64)
+                    })
+                    .await
+                    .into_response_or_err(&mut win32_us);
+                    finalize(inner, opts, ctx)
+                }
             }
         }
     };
@@ -1115,6 +1236,33 @@ fn scale_info_from(snap: &fastuse_win::scaling::ScaleSnapshot) -> fastuse_proto:
     }
 }
 
+/// Rewrite a `paste: true` failure so it cannot be read as "nothing happened".
+///
+/// The publish already succeeded by the time this runs, and the files are on
+/// the clipboard. A bare paste error looks identical to a failed publish, so
+/// the caller's obvious next move is to republish — pointless work on a path
+/// that empties the user's clipboard first. `Response` has no room for a
+/// partial success and is append-only, so the fact is carried in the message.
+///
+/// `paste_into` fails on focus, idle-wait or key injection; none of those
+/// messages carry a path, so this is safe to log.
+fn paste_failed_after_publish(e: Error) -> Error {
+    tracing::error!(
+        code = %e.code.as_str(),
+        error = %e.message,
+        "clipboard_set_files: published, but the paste failed"
+    );
+    Error::new(
+        e.code,
+        format!(
+            "the files were published to the clipboard, but the paste failed: {}. \
+             The clipboard already holds them, so republishing achieves nothing; \
+             paste manually or retry only the paste.",
+            e.message
+        ),
+    )
+}
+
 /// Apply `ActionOpts` post-action perception. Returns the inner response
 /// unchanged when `opts` is `None`; otherwise delegates to `action_opts::apply`.
 fn finalize(inner: Response, opts: Option<fastuse_proto::ActionOpts>, ctx: &DispatchCtx) -> Response {
@@ -1363,6 +1511,54 @@ mod tests {
         match r.response {
             Response::ListProcesses(_) => (),
             other => panic!("expected ListProcesses (not gated), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_files_scaled_coords_require_scale_context() {
+        // No screenshot has been taken, so the ScaleStack is empty. With
+        // coordinates_native: false this must go through resolve_coord and
+        // fail closed *before* gate_then — proving the DragFiles arm still
+        // calls resolve_coord instead of passing x/y straight through.
+        let ctx = ctx_with(vec!["drag_files".into()]);
+        let r = handle(
+            Request::DragFiles {
+                paths: Redact::new(vec!["C:\\x.png".into()]),
+                x: 10,
+                y: 10,
+                start_x: None,
+                start_y: None,
+                coordinates_native: false,
+                opts: None,
+            },
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::Internal),
+            other => panic!("expected no-scale-context error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drag_files_partial_start_point_is_rejected() {
+        let ctx = ctx_with(vec!["drag_files".into()]);
+        let r = handle(
+            Request::DragFiles {
+                paths: Redact::new(vec!["C:\\x.png".into()]),
+                x: 10,
+                y: 10,
+                start_x: Some(5),
+                start_y: None,
+                coordinates_native: true,
+                opts: None,
+            },
+            &ctx,
+        )
+        .await;
+        match r.response {
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::InvalidArgument),
+            other => panic!("expected rejection of a lone start axis, got {other:?}"),
         }
     }
 }

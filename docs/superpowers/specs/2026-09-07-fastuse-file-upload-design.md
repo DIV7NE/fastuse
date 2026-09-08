@@ -55,7 +55,8 @@ target's input queue.
 ## Tool surface
 
     file_dialog_set { paths, hwnd?, wait_for_dialog_ms = 5000,
-                      wait_for_close_ms = 5000, submit = true }
+                      wait_for_close_ms = 5000, submit = true,
+                      allow_new = false }
     clipboard_set_files { paths, paste = false, hwnd? }
     drag_files { paths, x, y, start_x?, start_y? }
 
@@ -66,6 +67,15 @@ beside the existing ones. `clipboard_set_files` is the exception: it becomes a
 check applies to it without new wiring.
 
 ## Shared front half
+
+`file_dialog_set` in Save mode is the one caller that must accept a path which
+does not exist yet — naming a new file is exactly what a Save dialog is for. So
+`files/mod.rs` also exposes `resolve_paths_allowing_new`, which requires the
+parent directory to exist and the leaf not to be an existing directory, but
+permits a missing leaf. The request carries an explicit `allow_new` flag rather
+than inferring the mode, because guessing wrong in either direction is silent:
+inferring Save from a missing path would turn a caller's typo into a created
+file, and inferring Open would make every Save call fail validation.
 
 All three share one `resolve_paths` helper, living beside the new modules in
 `fastuse-win`, which canonicalizes every entry, stats it, and
@@ -86,8 +96,12 @@ decision is enforced rather than remembered. Errors returned to the agent do inc
 offending path: an agent that cannot see which path was wrong cannot fix it.
 
 `clipboard_set_files` clobbers exactly the resource `clipboard_set_text` and
-`clipboard_set_image` already clobber, so it joins the default gated list in
-`docs/permissions.md`. `drag_files` presses the real mouse button and walks the
+`clipboard_set_image` already clobber, so it joins the default gated list. That
+list is `DEFAULT_GATED` in `crates/fastuse-win/src/permissions.rs` — the one
+`FASTUSE_SAFE_MODE` actually consults. The `TOOLS` tier table in
+`fastuse-core/src/perm.rs` is the v1 mechanism and is vestigial under v2; a tool
+added only there sails straight through safe mode, so both get the entry and the
+two lists are kept in agreement. `drag_files` presses the real mouse button and walks the
 real cursor across the desktop, so it is gated too. `file_dialog_set` stays
 ungated: it types into a dialog the user's own agent just caused to open, which
 is no more privileged than the `computer` typing actions that are always
@@ -199,6 +213,18 @@ medium with `SetTokenInformation`, and spawns with `CreateProcessAsUser`. If
 that misbehaves, the fallback is borrowing `explorer.exe`'s token via
 `CreateProcessWithTokenW`. Which of the two actually works on this machine
 deserves a ten-line spike before the implementation plan freezes.
+
+Both were run elevated and both work; the choice between them is therefore a
+security one, and it is settled in favour of the shell token. `SetTokenInformation(TokenIntegrityLevel)` lowers the mandatory
+label and nothing else, so the child keeps an enabled Administrators SID: a
+medium-integrity process holding administrative group membership. Borrowing the
+shell's token instead yields the user's ordinary token, which is what the drag
+source should have — it needs to read the files being dragged and talk COM to a
+medium-IL target, nothing more. The elevated spike measured exactly this: the
+label-lowered child reports `BUILTIN\Administrators` as `Enabled group, Group
+owner`, while the shell-token child reports it as `Group used for deny only`.
+The helper therefore uses `CreateProcessWithTokenW` with the shell's token, and
+needs no `CreateRestrictedToken` step.
 
 Two alternatives were considered and rejected. Requiring a non-elevated daemon
 for dragging is nearly free, but it forces the user to choose per session

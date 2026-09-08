@@ -66,6 +66,14 @@ impl RedactLen for String {
     }
 }
 
+/// Byte length of every path joined — the count of paths would leak less,
+/// but the redacted display is uniform in bytes across payload types.
+impl RedactLen for Vec<String> {
+    fn redact_len(&self) -> usize {
+        self.iter().map(|s| s.len()).sum()
+    }
+}
+
 impl<const N: usize> RedactLen for [u8; N] {
     fn redact_len(&self) -> usize {
         N

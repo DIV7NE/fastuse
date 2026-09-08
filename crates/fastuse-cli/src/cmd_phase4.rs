@@ -79,6 +79,86 @@ pub async fn clipboard_set_text(pipe_path: &str, text: String) -> anyhow::Result
     }
 }
 
+pub async fn clipboard_set_files(
+    pipe_path: &str,
+    paths: Vec<String>,
+    paste: bool,
+    hwnd: Option<u64>,
+) -> anyhow::Result<()> {
+    let req = Request::ClipboardSet {
+        req: ClipboardSet::Files { paths: Redact::new(paths), paste, hwnd },
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::ClipboardSet => {
+            println!("{}", json!({"ok": true}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn file_dialog_set(
+    pipe_path: &str,
+    paths: Vec<String>,
+    hwnd: Option<u64>,
+    wait_for_dialog_ms: u32,
+    wait_for_close_ms: u32,
+    submit: bool,
+    allow_new: bool,
+) -> anyhow::Result<()> {
+    let req = Request::FileDialogSet {
+        paths: Redact::new(paths),
+        hwnd,
+        wait_for_dialog_ms,
+        wait_for_close_ms,
+        submit,
+        allow_new,
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::FileDialog(r) => {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "dialog_hwnd": r.dialog_hwnd,
+                    "closed": r.closed,
+                    "fill_method": r.fill_method,
+                    "follow_up_dialogs": r.follow_up_dialogs.len(),
+                })
+            );
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
+pub async fn drag_files(
+    pipe_path: &str,
+    paths: Vec<String>,
+    x: i32,
+    y: i32,
+    start_x: Option<i32>,
+    start_y: Option<i32>,
+) -> anyhow::Result<()> {
+    let req = Request::DragFiles {
+        paths: Redact::new(paths), x, y, start_x, start_y,
+        coordinates_native: true,
+        opts: None,
+    };
+    match one_call(pipe_path, req).await? {
+        Response::Drag(r) => {
+            println!("{}", json!({"ok": true, "dropped": r.dropped, "effect": r.effect}));
+            Ok(())
+        }
+        Response::Error(e) => print_err(e),
+        other => Ok(println!("{}", json!({"unexpected": format!("{other:?}")}))),
+    }
+}
+
 pub async fn shell_exec(
     pipe_path: &str,
     command: String,

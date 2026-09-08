@@ -788,6 +788,48 @@ pub struct ClipboardSetTextArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ClipboardSetFilesArgs {
+    /// Absolute paths to place on the clipboard as a file list.
+    pub paths: Vec<String>,
+    /// Send Ctrl+V to the target after copying. Default false.
+    pub paste: Option<bool>,
+    /// Window to focus before pasting. Omit to use the foreground window.
+    pub hwnd: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct FileDialogSetArgs {
+    /// Absolute paths to put in the dialog's filename field.
+    pub paths: Vec<String>,
+    /// Scope discovery to this window's process. Omit to use the foreground
+    /// window's process.
+    pub hwnd: Option<u64>,
+    /// Budget for the dialog to appear, ms. Default 5000; 0 skips the wait.
+    pub wait_for_dialog_ms: Option<u32>,
+    /// Budget for the dialog to close after submit, ms. Default 5000.
+    pub wait_for_close_ms: Option<u32>,
+    /// Fill only, do not press Enter. Default false.
+    pub fill_only: Option<bool>,
+    /// Allow a path that does not exist yet. Set this for Save dialogs —
+    /// naming a new file is what they are for. Default false.
+    pub allow_new: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DragFilesArgs {
+    /// Absolute paths to drop.
+    pub paths: Vec<String>,
+    /// Drop target x, in the same coordinate space as `computer` clicks.
+    pub x: i32,
+    /// Drop target y.
+    pub y: i32,
+    /// Where the drag starts. Omit for an automatic point on the same monitor.
+    pub start_x: Option<i32>,
+    /// See `start_x`.
+    pub start_y: Option<i32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ShellExecArgs {
     pub command: String,
     /// "cmd" (default) | "powershell" | "pwsh" | "bash"
@@ -866,6 +908,20 @@ fn default_type_rate() -> u32 { 30 }
 pub struct ClipboardTextOutput {
     pub present: bool,
     pub text: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct FileDialogOutput {
+    pub dialog_hwnd: u64,
+    pub closed: bool,
+    pub fill_method: String,
+    pub follow_up_dialog_hwnds: Vec<u64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct DragOutput {
+    pub dropped: bool,
+    pub effect: u32,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1247,6 +1303,91 @@ impl Fastuse {
         let req = Request::ClipboardSet { req: fastuse_proto::ClipboardSet::Text(Redact::new(args.text)), opts: None };
         match self.call(req).await? {
             Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(
+        name = "clipboard_set_files",
+        description = "Put files on the clipboard as a file list (CF_HDROP), optionally pasting them into a \
+                       window with Ctrl+V. Works in Discord, Slack, Explorer, most Electron apps, and many \
+                       web drop zones. Permission-gated (Confirmed tier)."
+    )]
+    async fn clipboard_set_files(
+        &self,
+        Parameters(args): Parameters<ClipboardSetFilesArgs>,
+    ) -> Result<Json<AckOutput>, McpError> {
+        let req = Request::ClipboardSet {
+            req: fastuse_proto::ClipboardSet::Files {
+                paths: Redact::new(args.paths),
+                paste: args.paste.unwrap_or(false),
+                hwnd: args.hwnd,
+            },
+            opts: None,
+        };
+        match self.call(req).await? {
+            Response::ClipboardSet => Ok(Json(AckOutput { ok: true, slept_us: None })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(
+        name = "file_dialog_set",
+        description = "Fill and submit a native Windows file dialog (#32770) that is open or about to open. \
+                       Call this right after clicking a 'Choose file' / Save button. Waits for the dialog, \
+                       writes the paths into the filename field, presses Enter, and confirms the dialog closed."
+    )]
+    async fn file_dialog_set(
+        &self,
+        Parameters(args): Parameters<FileDialogSetArgs>,
+    ) -> Result<Json<FileDialogOutput>, McpError> {
+        let req = Request::FileDialogSet {
+            paths: Redact::new(args.paths),
+            hwnd: args.hwnd,
+            wait_for_dialog_ms: args.wait_for_dialog_ms.unwrap_or(5000),
+            wait_for_close_ms: args.wait_for_close_ms.unwrap_or(5000),
+            submit: !args.fill_only.unwrap_or(false),
+            allow_new: args.allow_new.unwrap_or(false),
+            opts: None,
+        };
+        match self.call(req).await? {
+            Response::FileDialog(r) => Ok(Json(FileDialogOutput {
+                dialog_hwnd: r.dialog_hwnd,
+                closed: r.closed,
+                fill_method: r.fill_method,
+                follow_up_dialog_hwnds: r.follow_up_dialogs.iter().map(|w| w.hwnd).collect(),
+            })),
+            Response::Error(e) => Err(Self::err_from_proto(e)),
+            other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
+        }
+    }
+
+    #[tool(
+        name = "drag_files",
+        description = "Drop files onto a screen coordinate with a real OLE drag-and-drop. Use for drop zones \
+                       that have no file input and do not accept a paste. Takes the real cursor and holds the \
+                       mouse button down for the duration of the drag. Screenshot first: the coordinate must \
+                       be current. A target that refuses the drop returns dropped: false with no error — that \
+                       is information, not a failure, and should not be retried or escalated. \
+                       Permission-gated (Confirmed tier)."
+    )]
+    async fn drag_files(
+        &self,
+        Parameters(args): Parameters<DragFilesArgs>,
+    ) -> Result<Json<DragOutput>, McpError> {
+        let req = Request::DragFiles {
+            paths: Redact::new(args.paths),
+            x: args.x,
+            y: args.y,
+            start_x: args.start_x,
+            start_y: args.start_y,
+            coordinates_native: false,
+            opts: None,
+        };
+        match self.call(req).await? {
+            Response::Drag(r) => Ok(Json(DragOutput { dropped: r.dropped, effect: r.effect })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }

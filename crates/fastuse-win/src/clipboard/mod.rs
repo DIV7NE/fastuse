@@ -23,13 +23,14 @@
 use fastuse_core::FastuseError;
 use fastuse_proto::{ClipFormat, ClipboardGet, ClipboardGetResp, ClipboardSet, Redact};
 
-use windows::core::PCWSTR;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
+    RegisterClipboardFormatW, SetClipboardData,
 };
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 
 /// CF_DIBV5 clipboard format constant.
@@ -42,6 +43,14 @@ const LCS_SRGB: u32 = 0x7352_4742_u32;
 
 /// Standard clipboard format: CF_UNICODETEXT.
 const CF_UNICODETEXT: u32 = 13;
+
+/// Standard clipboard format: CF_HDROP.
+const CF_HDROP: u32 = 15;
+
+/// `DROPEFFECT_COPY`. Published under `CFSTR_PREFERREDDROPEFFECT` so targets
+/// copy rather than MOVE - without it Explorer relocates the user's source
+/// file on paste, which is data loss, not a UX wart.
+const DROPEFFECT_COPY: u32 = 1;
 
 /// Read clipboard contents.
 #[tracing::instrument]
@@ -173,7 +182,158 @@ pub fn clipboard_set(set: ClipboardSet) -> Result<(), FastuseError> {
             let rgba_raw = rgba_image.into_raw();
             run_on_clipboard_thread(move || write_cf_dibv5(&rgba_raw, w, h))
         }
+        ClipboardSet::Files { paths, .. } => {
+            // Paths arrive already resolved: the dispatch layer canonicalizes
+            // before calling, so a bad path never reaches EmptyClipboard.
+            let paths = paths.into_inner();
+            tracing::info!(format = "files", path_count = paths.len(), "clipboard_set files");
+            run_on_clipboard_thread(move || write_cf_hdrop(&paths))
+        }
     }
+}
+
+/// Publish `paths` as `CF_HDROP` plus a preferred drop effect of COPY.
+///
+/// Both formats go on in one Open/Empty/Close window: emptying between the two
+/// `SetClipboardData` calls would discard the first.
+fn write_cf_hdrop(paths: &[String]) -> Result<(), FastuseError> {
+    let hdrop_bytes = crate::files::hdrop::build_hdrop(paths);
+    let effect_bytes = DROPEFFECT_COPY.to_le_bytes();
+
+    // SAFETY: open with NULL owner; paired close on every path.
+    unsafe {
+        OpenClipboard(Some(HWND::default()))
+            .map_err(|e| FastuseError::Io(format!("OpenClipboard (hdrop): {e}")))?;
+    }
+    let result: Result<(), FastuseError> = (|| {
+        // SAFETY: required before SetClipboardData per docs.
+        unsafe {
+            EmptyClipboard().map_err(|e| FastuseError::Io(format!("EmptyClipboard: {e}")))?;
+        }
+        let h_files = alloc_moveable(&hdrop_bytes)?;
+        // SAFETY: hand HGLOBAL ownership to the clipboard; do not free it.
+        unsafe {
+            SetClipboardData(CF_HDROP, Some(HANDLE(h_files.0 as _)))
+                .map_err(|e| FastuseError::Io(format!("SetClipboardData CF_HDROP: {e}")))?;
+        }
+        // SAFETY: registering an existing name returns the existing format id.
+        let fmt = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+        if fmt == 0 {
+            return Err(FastuseError::Io(
+                "RegisterClipboardFormatW(Preferred DropEffect) returned 0".into(),
+            ));
+        }
+        let h_effect = alloc_moveable(&effect_bytes)?;
+        // SAFETY: ownership transfers to the clipboard, as above.
+        unsafe {
+            SetClipboardData(fmt, Some(HANDLE(h_effect.0 as _)))
+                .map_err(|e| FastuseError::Io(format!("SetClipboardData drop effect: {e}")))?;
+        }
+        Ok(())
+    })();
+    // A failure between the two SetClipboardData calls would otherwise leave
+    // CF_HDROP published with no drop effect, and Explorer reads an
+    // effect-less file list as a MOVE — the user's source file disappears on
+    // the next manual paste. Leave nothing behind rather than that.
+    if result.is_err() {
+        // SAFETY: the clipboard is still open; EmptyClipboard frees whatever
+        // we already handed over.
+        unsafe {
+            let _ = EmptyClipboard();
+        }
+    }
+    // SAFETY: matched OpenClipboard.
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    result
+}
+
+/// Copy `bytes` into a fresh `GMEM_MOVEABLE` block for clipboard handoff.
+fn alloc_moveable(bytes: &[u8]) -> Result<HGLOBAL, FastuseError> {
+    // SAFETY: GMEM_MOVEABLE is what SetClipboardData requires.
+    let hmem = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
+        .map_err(|e| FastuseError::Io(format!("GlobalAlloc: {e}")))?;
+    // SAFETY: lock to fill the moveable block.
+    let dst = unsafe { GlobalLock(hmem) } as *mut u8;
+    if dst.is_null() {
+        return Err(FastuseError::Io("GlobalLock returned null".into()));
+    }
+    // SAFETY: dst is valid for bytes.len() bytes, freshly allocated.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        let _ = GlobalUnlock(hmem);
+    }
+    Ok(hmem)
+}
+
+/// Read the clipboard's `CF_HDROP` back as plain strings.
+///
+/// Exists for the round-trip test: the publish path has no other observable
+/// output, so without this the only check would be "it did not error".
+#[doc(hidden)]
+pub fn read_back_hdrop_for_test() -> Result<Vec<String>, FastuseError> {
+    run_on_clipboard_thread(|| {
+        // SAFETY: opened with a NULL owner; paired with CloseClipboard below.
+        unsafe { OpenClipboard(Some(HWND::default())) }
+            .map_err(|e| FastuseError::Io(format!("OpenClipboard: {e}")))?;
+        let result = (|| -> Result<Vec<String>, FastuseError> {
+            // SAFETY: handle stays owned by the clipboard; we only read it.
+            let h = unsafe { GetClipboardData(CF_HDROP) }
+                .map_err(|e| FastuseError::Io(format!("GetClipboardData(CF_HDROP): {e}")))?;
+            let hdrop = HDROP(h.0);
+            // SAFETY: count query form - u32::MAX index, NULL buffer.
+            let n = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+            let mut out = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let mut buf = [0u16; 260];
+                // SAFETY: buf outlives the call; len is its element count.
+                let written = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf[..])) } as usize;
+                out.push(String::from_utf16_lossy(&buf[..written]));
+            }
+            Ok(out)
+        })();
+        // SAFETY: paired with the OpenClipboard above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        result
+    })
+}
+
+/// Read the `Preferred DropEffect` DWORD back.
+#[doc(hidden)]
+pub fn read_back_preferred_effect_for_test() -> Result<u32, FastuseError> {
+    run_on_clipboard_thread(|| {
+        // SAFETY: opened with a NULL owner; paired with CloseClipboard below.
+        unsafe { OpenClipboard(Some(HWND::default())) }
+            .map_err(|e| FastuseError::Io(format!("OpenClipboard: {e}")))?;
+        let result = (|| -> Result<u32, FastuseError> {
+            // SAFETY: same registered name the publish path uses.
+            let fmt = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+            // SAFETY: handle stays owned by the clipboard.
+            let h = unsafe { GetClipboardData(fmt) }
+                .map_err(|e| FastuseError::Io(format!("GetClipboardData(effect): {e}")))?;
+            let hg = HGLOBAL(h.0 as *mut _);
+            // SAFETY: the blob is a single DWORD; unlocked immediately after.
+            let p = unsafe { GlobalLock(hg) } as *const u32;
+            if p.is_null() {
+                return Err(FastuseError::Io("GlobalLock returned null".into()));
+            }
+            // SAFETY: p points at a 4-byte block written by the publish path.
+            let v = unsafe { *p };
+            // SAFETY: paired with the GlobalLock above.
+            unsafe {
+                let _ = GlobalUnlock(hg);
+            }
+            Ok(v)
+        })();
+        // SAFETY: paired with the OpenClipboard above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        result
+    })
 }
 
 fn set_text_inner(s: &str) -> Result<(), FastuseError> {

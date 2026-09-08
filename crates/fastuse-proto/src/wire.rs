@@ -375,6 +375,57 @@ pub enum Request {
         /// drain).
         timeout_ms: u32,
     },
+
+    // --- v2.5.0: file upload ---
+    /// Fill and submit a native common file dialog (`#32770`).
+    FileDialogSet {
+        /// Absolute paths to place in the filename field. Redacted: paths
+        /// carry usernames.
+        paths: Redact<Vec<String>>,
+        /// Scope discovery to this window's process. `None` uses the
+        /// foreground window's process at call time.
+        hwnd: Option<u64>,
+        /// Budget for the dialog to appear. `0` skips the wait and requires
+        /// the dialog to already be up.
+        wait_for_dialog_ms: u32,
+        /// Budget for the dialog to close after submit. `0` skips the wait.
+        wait_for_close_ms: u32,
+        /// If false, fill the field and stop — no Enter, no close wait.
+        submit: bool,
+        /// Permit paths that do not exist yet. Required for Save dialogs,
+        /// whose whole purpose is naming a file that is not there. The
+        /// parent directory must still exist.
+        allow_new: bool,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
+    /// Drop files onto a screen coordinate via real OLE drag-and-drop.
+    /// Runs in a de-elevated child process; see the design doc.
+    DragFiles {
+        /// Absolute paths. Redacted: paths carry usernames.
+        paths: Redact<Vec<String>>,
+        /// Drop target x. Native virtual-desktop pixels, or scaled
+        /// image-pixel space per `coordinates_native` (same convention as
+        /// `ComputerRequest`).
+        x: i32,
+        /// Drop target y. See `x`.
+        y: i32,
+        /// Where the drag starts. Defaults to a point on the target's
+        /// monitor, away from the target itself. Same coordinate space as
+        /// `x`/`y`.
+        start_x: Option<i32>,
+        /// See `start_x`.
+        start_y: Option<i32>,
+        /// When `true`, `x`/`y`/`start_x`/`start_y` are native
+        /// virtual-desktop pixels and `ScaleStack` translation is skipped
+        /// (CLI). When `false` (default), they are scaled image-pixel space
+        /// and are translated through the current `ScaleStack` snapshot
+        /// (MCP) — see `ComputerRequest::coordinates_native`.
+        #[serde(default)]
+        coordinates_native: bool,
+        /// Optional post-action perception bundle.
+        opts: Option<ActionOpts>,
+    },
 }
 
 /// Clipboard format selector.
@@ -451,6 +502,16 @@ pub enum ClipboardSet {
         /// Image height in pixels.
         h: u32,
     },
+    /// File list payload — published as `CF_HDROP`.
+    Files {
+        /// Absolute paths. Redacted: paths carry usernames.
+        paths: Redact<Vec<String>>,
+        /// Send Ctrl+V to the target after publishing.
+        paste: bool,
+        /// Window to focus before pasting. `None` uses the current
+        /// foreground window.
+        hwnd: Option<u64>,
+    },
 }
 
 impl core::fmt::Debug for ClipboardSet {
@@ -463,6 +524,12 @@ impl core::fmt::Debug for ClipboardSet {
                 .field("bytes", bytes)
                 .field("w", w)
                 .field("h", h)
+                .finish(),
+            Self::Files { paths, paste, hwnd } => f
+                .debug_struct("ClipboardSet::Files")
+                .field("path_count", &paths.as_inner().len())
+                .field("paste", paste)
+                .field("hwnd", hwnd)
                 .finish(),
         }
     }
@@ -824,6 +891,37 @@ pub enum Response {
         /// Owning process basename (e.g. `tf2loader.exe`).
         process_name: String,
     },
+
+    // --- v2.5.0: file upload ---
+    /// Outcome of a `FileDialogSet`.
+    FileDialog(FileDialogResult),
+    /// Outcome of a `DragFiles`.
+    Drag(DragResult),
+}
+
+/// What `drag_files` observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DragResult {
+    /// True when the target accepted the drop.
+    pub dropped: bool,
+    /// The `DROPEFFECT` the target reported (1 = copy).
+    pub effect: u32,
+}
+
+/// What `file_dialog_set` observed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileDialogResult {
+    /// HWND of the dialog that was filled.
+    pub dialog_hwnd: u64,
+    /// True when that specific dialog is gone. False when `submit` was
+    /// false, or when the close wait expired.
+    pub closed: bool,
+    /// Any `#32770` that appeared after ours and is still up — typically a
+    /// Save dialog's overwrite-confirm prompt. Answering it is the agent's
+    /// call, not ours: it is a destructive choice.
+    pub follow_up_dialogs: Vec<crate::coords::WindowInfo>,
+    /// How the filename field was written: `"value_pattern"` or `"wm_settext"`.
+    pub fill_method: String,
 }
 
 /// Pipe-name pattern. The actual session_id and user_sid_short are filled in

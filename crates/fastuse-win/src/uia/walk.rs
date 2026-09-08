@@ -173,7 +173,7 @@ pub(crate) fn walk_cached(el: &UIElement, depth_remaining: u32) -> Result<UIANod
 
 /// Map the uiautomation crate's `ControlType` enum to our protocol's closed
 /// subset. Anything outside the closed set falls through to `Custom`.
-fn map_control_type(ct: UiaControlType) -> ProtoControlType {
+pub(crate) fn map_control_type(ct: UiaControlType) -> ProtoControlType {
     match ct {
         UiaControlType::Button => ProtoControlType::Button,
         UiaControlType::Edit => ProtoControlType::Edit,

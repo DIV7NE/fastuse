@@ -28,7 +28,8 @@ Plus Windows-specific helpers as separate MCP tools:
 `mcp__fastuse__launch_app`, `mcp__fastuse__shell_exec`,
 `mcp__fastuse__clipboard_get_text`, `mcp__fastuse__clipboard_set_text`,
 `mcp__fastuse__inspect_at`, `mcp__fastuse__uia_query`,
-`mcp__fastuse__uia_tree`.
+`mcp__fastuse__uia_tree`, `mcp__fastuse__file_dialog_set`,
+`mcp__fastuse__clipboard_set_files`, `mcp__fastuse__drag_files`.
 
 UIA tools are read-only — they return structure for grounding (DevTools-style),
 they do not click. All clicking goes through `computer` with coordinates.
@@ -253,3 +254,14 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 > Profile not yet configured. Run `/gsd-profile-user` to generate your developer profile.
 > This section is managed by `generate-claude-profile` -- do not edit manually.
 <!-- GSD:profile-end -->
+
+
+---
+
+## Global working spec (added 2026-07-06)
+
+All work in this project also follows the global spec at
+`C:\Users\Uporabnik\.claude\CLAUDE.md` ("Fable mode": understand -> act -> verify,
+root-cause fixes over symptom patches, minimal diffs after full reading, run-it
+verification, outcome-first reporting). Claude Code loads it automatically; any
+other model or tool should read it first. Portable copy: `C:\Users\Uporabnik\Desktop\CLAUDE.md`.

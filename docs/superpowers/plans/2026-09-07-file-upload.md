@@ -47,7 +47,7 @@ Tasks 8 and 9 get `opus` on both seats because they are where a subtle mistake i
 
 **New files**
 
-- `crates/fastuse-win/src/files/mod.rs` — module root; owns `resolve_paths`, the shared front half for all three tools.
+- `crates/fastuse-win/src/files/mod.rs` — module root; owns `resolve_paths` and its Save-mode sibling `resolve_paths_allowing_new`, the shared front half for all three tools.
 - `crates/fastuse-win/src/files/dialog.rs` — `file_dialog_set`: discovery, fill, submit, close-confirm.
 - `crates/fastuse-win/src/files/hdrop.rs` — pure `CF_HDROP` byte-buffer construction. No Win32 calls, fully unit-testable.
 - `crates/fastuse-win/src/files/drag.rs` — daemon-side drag orchestration: spawn helper, walk cursor, guarantee button-up.
@@ -351,7 +351,7 @@ async fn file_dialog_set_saves_notepad_document() {
     std::fs::remove_file(&target).ok();
 }
 
-async fn wait_for_notepad(client: &mut Client) -> u64 {
+async fn wait_for_notepad(client: &mut TestClient) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let r = client
@@ -373,7 +373,7 @@ async fn wait_for_notepad(client: &mut Client) -> u64 {
 }
 ```
 
-Note: read `crates/fastuse-daemon/tests/harness/` first and match the actual `Client` type name and `connect_or_skip` signature used by `notepad_e2e.rs`; adjust the two helper call sites if they differ. Also confirm the `Response` variant that `ListWindows` returns (`notepad_e2e.rs` shows it) and use that name.
+Verified against the existing harness while writing this plan: `crates/fastuse-daemon/tests/harness/mod.rs` exposes `pub struct TestClient` with `pub async fn call(&mut self, req: Request) -> std::io::Result<Response>`, and `pub async fn connect_or_skip() -> TestClient` (not a `Result`). `ListWindows` returns `Response::Windows(Vec<WindowInfo>)`, and `fastuse_proto::Error` has public `code`, `message`, and `hint` fields. The test above uses all four as written.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -401,6 +401,10 @@ In `crates/fastuse-proto/src/wire.rs`, add to the `Request` enum after the `Wait
         wait_for_close_ms: u32,
         /// If false, fill the field and stop — no Enter, no close wait.
         submit: bool,
+        /// Permit paths that do not exist yet. Required for Save dialogs,
+        /// whose whole purpose is naming a file that is not there. The
+        /// parent directory must still exist.
+        allow_new: bool,
         /// Optional post-action perception bundle.
         opts: Option<ActionOpts>,
     },
@@ -457,7 +461,6 @@ Create `crates/fastuse-win/src/files/dialog.rs`:
 //! which is atomic and does not depend on focus, with `WM_SETTEXT` as the
 //! fallback for dialogs that expose no usable UIA tree.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastuse_proto::{
@@ -466,6 +469,10 @@ use fastuse_proto::{
 
 use crate::input_thread::InputThreadHandle;
 use crate::uia_pool::UiaPoolHandle;
+
+// Note: `press_chord` in `input/modifier_guard.rs` is a different thing (it
+// takes `&[ModKey]` and returns a guard). The chord entry point is
+// `input::handlers::key(chord_str, repeat)`.
 use crate::window::list_windows::list_windows;
 
 /// Window class of every Win32 common dialog.
@@ -475,14 +482,19 @@ const DIALOG_CLASS: &str = "#32770";
 #[allow(clippy::too_many_arguments)]
 pub fn file_dialog_set(
     uia_pool: &UiaPoolHandle,
-    input: &Arc<InputThreadHandle>,
+    input: &InputThreadHandle,
     paths: Vec<String>,
     hwnd: Option<u64>,
     wait_for_dialog_ms: u32,
     wait_for_close_ms: u32,
     submit: bool,
+    allow_new: bool,
 ) -> Result<FileDialogResult, ProtoError> {
-    let resolved = super::resolve_paths(&paths)?;
+    let resolved = if allow_new {
+        super::resolve_paths_allowing_new(&paths)?
+    } else {
+        super::resolve_paths(&paths)?
+    };
     let field_value = join_for_field(&resolved);
 
     let scope_pid = scope_pid(hwnd)?;
@@ -502,7 +514,7 @@ pub fn file_dialog_set(
 
     // Enter, not a click on the Open button: Enter is invariant to the
     // button's position and to the dialog's language.
-    input.run(move || crate::input::keyboard::press_chord("enter"))?;
+    input.run(move || crate::input::handlers::key("enter", 1))?;
 
     let closed = wait_for_close(dialog.hwnd, wait_for_close_ms);
     let follow_up_dialogs = dialogs_for_pid(scope_pid)?
@@ -656,28 +668,36 @@ In `crates/fastuse-daemon/src/dispatch.rs`, beside the other arms (the `Request:
             wait_for_dialog_ms,
             wait_for_close_ms,
             submit,
+            allow_new,
             opts,
-        } => {
-            let w = Instant::now();
-            let r = fastuse_win::files::dialog::file_dialog_set(
-                &ctx.uia_pool,
-                &ctx.input,
-                paths.into_inner(),
-                hwnd,
-                wait_for_dialog_ms,
-                wait_for_close_ms,
-                submit,
-            );
-            win32_us = w.elapsed().as_micros() as i64;
-            let inner = match r {
-                Ok(res) => Response::FileDialog(res),
-                Err(e) => Response::Error(e),
-            };
-            finalize(inner, opts, ctx)
-        }
+        } => match (ctx.uia.as_ref(), ctx.input.as_ref()) {
+            (Some(uia), Some(input)) => {
+                let w = Instant::now();
+                let r = fastuse_win::files::dialog::file_dialog_set(
+                    uia,
+                    input,
+                    paths.into_inner(),
+                    hwnd,
+                    wait_for_dialog_ms,
+                    wait_for_close_ms,
+                    submit,
+                    allow_new,
+                );
+                win32_us = w.elapsed().as_micros() as i64;
+                let inner = match r {
+                    Ok(res) => Response::FileDialog(res),
+                    Err(e) => Response::Error(e),
+                };
+                finalize(inner, opts, ctx)
+            }
+            _ => Response::Error(Error::new(
+                ErrorCode::Internal,
+                "uia pool or input thread unavailable".to_string(),
+            )),
+        },
 ```
 
-Read the surrounding arms first and match how `ctx.uia_pool` / `ctx.input` are actually named and borrowed there — `handle_type_into_element` call sites in the same file show the convention.
+Verified in `dispatch.rs` while writing this plan, so do not re-derive it: `DispatchCtx` field for the UIA pool is `uia: Option<Arc<UiaPoolHandle>>` (NOT `uia_pool`), and the input handle is `input: Option<Arc<InputThreadHandle>>`. Both are `Option`s that surrounding arms unwrap with `.as_ref()` and an explicit `None` error arm — the `Request::UiaQuery` arm around line 413 is the pattern to copy. Match its `None` message style if it differs from the placeholder above.
 
 - [ ] **Step 7: Build and run the unit tests**
 
@@ -732,6 +752,9 @@ pub struct FileDialogSetArgs {
     pub wait_for_close_ms: Option<u32>,
     /// Fill only, do not press Enter. Default false.
     pub fill_only: Option<bool>,
+    /// Allow a path that does not exist yet. Set this for Save dialogs —
+    /// naming a new file is what they are for. Default false.
+    pub allow_new: Option<bool>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -764,6 +787,7 @@ In the same file, in the `#[tool_router]` impl block beside the clipboard tools:
             wait_for_dialog_ms: args.wait_for_dialog_ms.unwrap_or(5000),
             wait_for_close_ms: args.wait_for_close_ms.unwrap_or(5000),
             submit: !args.fill_only.unwrap_or(false),
+            allow_new: args.allow_new.unwrap_or(false),
             opts: None,
         };
         match self.call(req).await? {
@@ -800,15 +824,21 @@ In `crates/fastuse-cli/src/main.rs`, in the `Cmd` enum beside `ClipboardSetText`
         /// Fill the field but do not press Enter.
         #[arg(long)]
         fill_only: bool,
+        /// Allow a path that does not exist yet (Save dialogs).
+        #[arg(long)]
+        allow_new: bool,
     },
 ```
 
 And in the dispatch `match` (around line 879):
 
 ```rust
-            Cmd::FileDialogSet { paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only } => {
+            Cmd::FileDialogSet {
+                paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, fill_only, allow_new,
+            } => {
                 cmd_phase4::file_dialog_set(
-                    &identity.path, paths, hwnd, wait_for_dialog_ms, wait_for_close_ms, !fill_only,
+                    &identity.path, paths, hwnd, wait_for_dialog_ms, wait_for_close_ms,
+                    !fill_only, allow_new,
                 )
                 .await
             }
@@ -826,6 +856,7 @@ pub async fn file_dialog_set(
     wait_for_dialog_ms: u32,
     wait_for_close_ms: u32,
     submit: bool,
+    allow_new: bool,
 ) -> anyhow::Result<()> {
     let req = Request::FileDialogSet {
         paths: Redact::new(paths),
@@ -833,6 +864,7 @@ pub async fn file_dialog_set(
         wait_for_dialog_ms,
         wait_for_close_ms,
         submit,
+        allow_new,
         opts: None,
     };
     match one_call(pipe_path, req).await? {
@@ -862,9 +894,9 @@ Run:
 cargo build --release
 ./target/release/fastuse-cli.exe launch-app notepad.exe
 ./target/release/fastuse-cli.exe computer key ctrl+s
-./target/release/fastuse-cli.exe file-dialog-set "$TEMP/fastuse_cli_check.txt"
+./target/release/fastuse-cli.exe file-dialog-set "$TEMP/fastuse_cli_check.txt" --allow-new
 ```
-Expected: JSON with `"closed": true`, and `%TEMP%\fastuse_cli_check.txt` on disk. Delete it afterwards.
+Expected: JSON with `"closed": true`, and `%TEMP%\fastuse_cli_check.txt` on disk. Delete it afterwards. `--allow-new` is required here because this is a Save dialog naming a file that does not exist yet; without it the call fails validation, which is the intended behaviour.
 
 - [ ] **Step 6: Commit**
 
@@ -1121,9 +1153,12 @@ const DROPEFFECT_COPY: u32 = 1;
 
 Add a `ClipboardSet::Files` arm to `clipboard_set` that, on the existing STA helper thread, opens the clipboard, empties it, and publishes two formats: the `build_hdrop` buffer under `CF_HDROP`, and a 4-byte `DROPEFFECT_COPY` under the registered format `CFSTR_PREFERREDDROPEFFECT` (obtained with `RegisterClipboardFormatW(w!("Preferred DropEffect"))`). Both payloads go into `GlobalAlloc(GMEM_MOVEABLE, len)` blocks, filled under `GlobalLock`/`GlobalUnlock` — copy the existing image path's allocation helper rather than writing a new one; ownership transfers to the clipboard on `SetClipboardData`, so the handles must not be freed afterwards.
 
-Path resolution happens before the clipboard is touched: `let resolved = crate::files::resolve_paths(&paths.into_inner())?;` so a bad path never empties the user's clipboard.
+**Two responsibilities that deliberately do NOT live in `clipboard_set`,** because its signature cannot carry them. It is `clipboard_set(set: ClipboardSet) -> Result<(), FastuseError>`: no input-thread handle, and `FastuseError` has no variant that can carry an arbitrary `ErrorCode`, so a `FileNotFound` from path resolution would be flattened into `Internal` and the agent would lose the one code that tells it which path was wrong.
 
-When `paste` is true, after the clipboard is closed: focus `hwnd` if given via the existing focus helper, run the existing `wait_for_idle` drain against it, then send `ctrl+v` through the input thread. The drain is what stops Electron targets from swallowing the paste.
+So both happen in the dispatch arm instead:
+
+1. **Path resolution**, inside the gated closure and before `clipboard_set` is called, so a bad path never empties the user's clipboard and the `ProtoError` reaches the wire with its code intact. Resolve, then rebuild the variant with the resolved absolute strings and hand that to `clipboard_set`, which therefore only ever sees paths that are already valid.
+2. **The paste**, after the gate returns success, using `ctx.input`. Add a small `files::paste_into(input: &InputThreadHandle, hwnd: Option<u64>) -> Result<(), ProtoError>` helper that focuses `hwnd` when given via `window::focus::focus_window`, runs `window::wait_for_idle::wait_for_idle(hwnd, 1000)`, then sends `input::handlers::key("ctrl+v", 1)`. The drain is what stops Electron targets from swallowing the paste. Keeping it in `files/` rather than inline keeps `dispatch.rs`, already 1400 lines, from growing a fourth responsibility.
 
 Add the two read-back helpers the test calls. `#[cfg(test)]` does **not** apply to an integration test under `tests/`, so these are ordinary `pub` functions marked `#[doc(hidden)]` — read `crates/fastuse-win/tests/bench_phase4.rs` first and match however it already reaches into this crate:
 
@@ -1428,6 +1463,15 @@ Spike code deleted; only the answer survives, recorded in the plan."
 
 ## Task 8: The de-elevated drag helper
 
+> **Spike answered (Task 7, elevated run).** Both approaches produce a Medium-integrity child,
+> but they are not equivalent and **approach B wins**: borrow `explorer.exe`'s token via
+> `CreateProcessWithTokenW`. Evidence from the two children's own `whoami /groups`:
+> approach A leaves `BUILTIN\Administrators` as `Enabled group, Group owner` — a medium-IL
+> process still holding live admin membership — while approach B leaves it `Group used for
+> deny only`, which is the ordinary de-elevated user token. Implement B. No
+> `CreateRestrictedToken` step is needed.
+
+
 **Files:**
 - Modify: `crates/fastuse-win/Cargo.toml` (three new `windows` features)
 - Create: `crates/fastuse-win/src/files/deelevate.rs`
@@ -1567,6 +1611,7 @@ binary."
 
 **Files:**
 - Modify: `crates/fastuse-proto/src/wire.rs`
+- Modify: `crates/fastuse-win/src/permissions.rs` (`DEFAULT_GATED` — the list safe mode actually reads)
 - Modify: `crates/fastuse-core/src/perm.rs`
 - Create: `crates/fastuse-win/src/files/drag.rs`
 - Modify: `crates/fastuse-daemon/src/dispatch.rs`
@@ -1619,9 +1664,18 @@ pub struct DragResult {
 }
 ```
 
-In `crates/fastuse-core/src/perm.rs`:
+Gating lives in **two** places, and only one of them actually enforces safe mode. Task 5 discovered this the hard way, so do both:
 
 ```rust
+// crates/fastuse-win/src/permissions.rs — DEFAULT_GATED. THIS is the list
+// FASTUSE_SAFE_MODE consults. Omit an entry here and the tool sails through
+// safe mode no matter what perm.rs says.
+    "drag_files",
+```
+
+```rust
+// crates/fastuse-core/src/perm.rs — the v1 tier table. Vestigial under v2 but
+// kept consistent so the two lists never disagree.
     // Presses the real mouse button and walks the real cursor across the
     // desktop; same tier as the other tools that act on the user's session.
     ToolPerm { name: "drag_files", default_tier: Tier::Confirmed },
@@ -1656,7 +1710,7 @@ const MOVE_STEPS: u32 = 20;
 
 1. `resolve_paths` first — before anything touches the mouse.
 2. Pick `start_x`/`start_y` when not supplied: a point on the same monitor as `(x, y)` (use the existing monitor enumeration), offset far enough from the target that the initial button-down cannot land on the drop zone.
-3. Spawn the helper with `spawn_medium_il(current_exe, ["--drag-helper"])`, write the `DragJob` JSON to its stdin, and read the `{"ready":true}` line back. If the helper dies before that line, return `ErrorCode::HelperSpawnFailed`.
+3. Spawn the helper with `spawn_medium_il(&current_exe, &["--drag-helper".to_string()])`, write the `DragJob` JSON to its stdin, and read the `{"ready":true}` line back. If the helper dies before that line, return `ErrorCode::HelperSpawnFailed`.
 4. Inject the left-button-down at the start point through the input thread.
 5. Walk the cursor to `(x, y)` in `MOVE_STEPS` steps with a short sleep between, then inject the left-button-up.
 6. Read the `DragOutcome` line with a deadline.
