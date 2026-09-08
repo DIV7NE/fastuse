@@ -922,6 +922,9 @@ pub struct FileDialogOutput {
 pub struct DragOutput {
     pub dropped: bool,
     pub effect: u32,
+    /// The window that was under the drop point when the button was
+    /// released. Compare it with the window you aimed at.
+    pub drop_target: Option<WindowInfo>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1371,6 +1374,12 @@ impl Fastuse {
                        mouse button down for the duration of the drag. Screenshot first: the coordinate must \
                        be current. A target that refuses the drop returns dropped: false with no error — that \
                        is information, not a failure, and should not be retried or escalated. \
+                       dropped: true means SOME drop target accepted the files with the reported effect, \
+                       not that they reached the window you meant. A drag lands on whichever window is \
+                       above the coordinate, and a browser accepts a file drop by opening it in a tab \
+                       while reporting the same effect: 1 that a folder view reports for a real copy. \
+                       Always check drop_target against the window you aimed at; if it names something \
+                       else, the files went there instead. \
                        Permission-gated (Confirmed tier)."
     )]
     async fn drag_files(
@@ -1387,7 +1396,11 @@ impl Fastuse {
             opts: None,
         };
         match self.call(req).await? {
-            Response::Drag(r) => Ok(Json(DragOutput { dropped: r.dropped, effect: r.effect })),
+            Response::Drag(r) => Ok(Json(DragOutput {
+                dropped: r.dropped,
+                effect: r.effect,
+                drop_target: r.drop_target,
+            })),
             Response::Error(e) => Err(Self::err_from_proto(e)),
             other => Err(McpError::internal_error(format!("unexpected: {other:?}"), None)),
         }

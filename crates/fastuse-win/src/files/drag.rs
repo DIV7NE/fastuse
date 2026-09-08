@@ -10,10 +10,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use fastuse_proto::{DragResult, Error as ProtoError, ErrorCode, MonitorInfo, MouseButton, Rect};
+use fastuse_proto::{
+    DragResult, Error as ProtoError, ErrorCode, MonitorInfo, MouseButton, Rect, WindowInfo,
+};
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
 
 use crate::files::deelevate::{spawn_medium_il, MediumIlChild};
 use crate::input::sendinput::{mouse_absolute, mouse_button_flags, send};
@@ -194,6 +198,7 @@ pub fn drag_files(
     }
 
     let started = Instant::now();
+    let drop_hwnd;
     tracing::debug!(ready_wait_ms = started.duration_since(spawned).as_millis() as u64, "drag_files: helper ready");
     {
         // A guard, not a line at the bottom of the happy path: written as a
@@ -216,7 +221,15 @@ pub fn drag_files(
         });
         press_at(input, sx, sy)?;
         walk_to(input, sx, sy, x, y)?;
+        // Sampled here, with the button still down: the drop activates the
+        // window that receives it, so probing after the release reports
+        // whichever window the drop brought forward. Only the HWND is taken
+        // now — resolving its title costs a cross-process WM_GETTEXT, and
+        // nothing may run for 100ms with the user's mouse button held.
+        drop_hwnd = window_at(x, y);
     }
+
+    let drop_target = drop_hwnd.and_then(|h| crate::window::build_window_info(h).ok());
 
     let injected = started.elapsed();
     tracing::debug!(walk_ms = injected.as_millis() as u64, "drag_files: cursor walk done, button released");
@@ -243,7 +256,7 @@ pub fn drag_files(
             format!("the drag helper's outcome is not valid JSON: {e}"),
         )
     })?;
-    let result = match map_outcome(outcome) {
+    let result = match map_outcome(outcome, drop_target) {
         Ok(r) => r,
         Err(e) => {
             // The error also travels back to the caller, but nothing on the
@@ -258,6 +271,8 @@ pub fn drag_files(
         dropped = result.dropped,
         effect = result.effect,
         total_ms = started.elapsed().as_millis() as u64,
+        drop_target_hwnd = result.drop_target.as_ref().map(|w| w.hwnd),
+        drop_target_process = result.drop_target.as_ref().map(|w| w.process_name.as_str()),
         "drag_files: outcome"
     );
     Ok(result)
@@ -370,7 +385,7 @@ fn lerp(sx: i32, sy: i32, ex: i32, ey: i32, step: u32, steps: u32) -> (i32, i32)
 /// HRESULT). Reporting those as a refusal would tell the agent — which the
 /// tool description instructs not to retry a refusal — that the target simply
 /// said no, and would throw away the only account of what went wrong.
-fn map_outcome(o: DragOutcome) -> Result<DragResult, ProtoError> {
+fn map_outcome(o: DragOutcome, drop_target: Option<WindowInfo>) -> Result<DragResult, ProtoError> {
     if let Some(why) = o.error {
         return Err(ProtoError::new(
             ErrorCode::DragFailed,
@@ -380,7 +395,25 @@ fn map_outcome(o: DragOutcome) -> Result<DragResult, ProtoError> {
     Ok(DragResult {
         dropped: o.dropped && o.effect != 0,
         effect: o.effect,
+        drop_target,
     })
+}
+
+/// The top-level window under `(x, y)`, or `None` if the point is bare.
+///
+/// `GetAncestor(GA_ROOT)` because `WindowFromPoint` returns the deepest child
+/// — a render surface whose class and title say nothing about which
+/// application received the drop.
+fn window_at(x: i32, y: i32) -> Option<HWND> {
+    // SAFETY: WindowFromPoint accepts any POINT and returns a null HWND when
+    // the point is over no window.
+    let hwnd = unsafe { WindowFromPoint(POINT { x, y }) };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    // SAFETY: GetAncestor accepts any live HWND; returns it unchanged when it
+    // is already top-level.
+    Some(unsafe { GetAncestor(hwnd, GA_ROOT) })
 }
 
 /// Is `line` the helper's readiness line?
@@ -518,11 +551,11 @@ mod tests {
     fn a_refused_drop_is_a_result_not_a_failure() {
         // DoDragDrop reports DRAGDROP_S_DROP with DROPEFFECT_NONE when the
         // target says no. That is `dropped: false`, and it is not an error.
-        let refused = map_outcome(DragOutcome { dropped: true, effect: 0, error: None }).unwrap();
+        let refused = map_outcome(DragOutcome { dropped: true, effect: 0, error: None }, None).unwrap();
         assert!(!refused.dropped);
         assert_eq!(refused.effect, 0);
 
-        let accepted = map_outcome(DragOutcome { dropped: true, effect: 1, error: None }).unwrap();
+        let accepted = map_outcome(DragOutcome { dropped: true, effect: 1, error: None }, None).unwrap();
         assert!(accepted.dropped);
         assert_eq!(accepted.effect, 1);
 
@@ -531,6 +564,61 @@ mod tests {
         let e = early_failure(r#"{"dropped":false,"effect":0,"error":"OleInitialize failed"}"#);
         assert_eq!(e.code, ErrorCode::DragFailed);
         assert!(e.message.contains("OleInitialize failed"), "{}", e.message);
+    }
+
+    /// The drop target must survive into the result, because it is the only
+    /// thing that makes `dropped: true` falsifiable. A drag lands on whatever
+    /// window is above the point, and a browser reports the same
+    /// `DROPEFFECT_COPY` for "opened it in a tab" that a folder reports for a
+    /// real copy — so a result without this field cannot be checked at all.
+    #[test]
+    fn the_window_that_received_the_drop_is_reported_alongside_the_effect() {
+        let target = WindowInfo {
+            hwnd: 42,
+            title: "fu_probe - File Explorer".to_string(),
+            class: "CabinetWClass".to_string(),
+            process_name: "explorer.exe".to_string(),
+            pid: 7,
+            bounds: Rect { x: 0, y: 0, w: 800, h: 600 },
+        };
+        let r = map_outcome(
+            DragOutcome { dropped: true, effect: 1, error: None },
+            Some(target.clone()),
+        )
+        .unwrap();
+        assert!(r.dropped && r.effect == 1);
+        assert_eq!(r.drop_target.as_ref(), Some(&target));
+
+        // And a point over nothing reports nothing rather than inventing a
+        // window: `None` here is what tells the caller it cannot check.
+        let bare = map_outcome(
+            DragOutcome { dropped: true, effect: 1, error: None },
+            None,
+        )
+        .unwrap();
+        assert!(bare.drop_target.is_none());
+    }
+
+    /// `WindowFromPoint` returns the deepest child; the caller needs the
+    /// top-level window to compare against what `list_windows` handed it.
+    #[test]
+    fn window_at_reports_a_top_level_window() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, IsWindow};
+        // SAFETY: both take a plain HWND / no arguments.
+        let desktop = unsafe { GetDesktopWindow() };
+        let mut r = windows::Win32::Foundation::RECT::default();
+        // SAFETY: `r` is a live local; `desktop` is always a valid HWND.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(desktop, &mut r) }.unwrap();
+        let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        if let Some(h) = window_at(cx, cy) {
+            // SAFETY: `h` came from the window manager moments ago.
+            assert!(unsafe { IsWindow(Some(h)) }.as_bool());
+            // GA_ROOT is idempotent, so a second climb must not move.
+            assert_eq!(window_at(cx, cy).map(|x| x.0), Some(h.0));
+            // SAFETY: `h` is live.
+            let parent = unsafe { GetAncestor(h, GA_ROOT) };
+            assert_eq!(parent.0, h.0, "window_at returned a child, not a root");
+        }
     }
 
     #[test]
@@ -544,7 +632,7 @@ mod tests {
             dropped: false,
             effect: 0,
             error: Some("no WM_LBUTTONDOWN arrived before the deadline".to_string()),
-        })
+        }, None)
         .expect_err("a helper error must not become Ok(dropped: false)");
         assert_eq!(e.code, ErrorCode::DragFailed);
         assert!(e.message.contains("no WM_LBUTTONDOWN"), "{}", e.message);

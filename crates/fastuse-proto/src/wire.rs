@@ -900,12 +900,36 @@ pub enum Response {
 }
 
 /// What `drag_files` observed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DragResult {
     /// True when the target accepted the drop.
+    ///
+    /// "The target", not "the target you meant": a drag lands on whatever
+    /// window is above the drop point, exactly as it would for a human. See
+    /// [`DragResult::drop_target`] before reading this as success.
     pub dropped: bool,
     /// The `DROPEFFECT` the target reported (1 = copy).
     pub effect: u32,
+    /// The top-level window that was under the drop point when the button
+    /// was released, sampled *before* the release.
+    ///
+    /// `dropped: true` only says some drop target accepted the payload with
+    /// the reported effect; OLE gives the source nothing else. A browser
+    /// accepts a file drop and opens it in a tab, reporting exactly the
+    /// `DROPEFFECT_COPY` that a folder view reports for a real copy. So the
+    /// caller must compare this against the window it aimed at; without it
+    /// `dropped: true` is unfalsifiable.
+    ///
+    /// Sampled before the release because the drop itself activates the
+    /// receiving window: probing afterwards names whichever window the drop
+    /// brought forward, which is the same answer whether or not it was the
+    /// intended one.
+    ///
+    /// `None` when no window covered the point, or when it had gone by the
+    /// time its details were read. Defaulted so a daemon older than the
+    /// client still decodes (v2.5.1).
+    #[serde(default)]
+    pub drop_target: Option<crate::coords::WindowInfo>,
 }
 
 /// What `file_dialog_set` observed.

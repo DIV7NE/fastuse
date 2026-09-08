@@ -151,7 +151,15 @@ pub async fn drag_files(
     };
     match one_call(pipe_path, req).await? {
         Response::Drag(r) => {
-            println!("{}", json!({"ok": true, "dropped": r.dropped, "effect": r.effect}));
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "dropped": r.dropped,
+                    "effect": r.effect,
+                    "drop_target": r.drop_target,
+                })
+            );
             Ok(())
         }
         Response::Error(e) => print_err(e),
