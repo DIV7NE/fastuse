@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.5.0 — 2026-09-08
+
+### Added
+- Three tools that put a file into a Windows application, covering the three
+  mechanisms Windows actually offers. `file_dialog_set` fills the native
+  `#32770` common dialog that opens behind `<input type=file>` in every browser
+  and behind every Open/Save command, via UIA `ValuePattern` with a `WM_SETTEXT`
+  fallback. `clipboard_set_files` publishes `CF_HDROP` and can paste it with
+  Ctrl+V, reaching Discord, Slack, Explorer, most Electron apps and many web
+  drop zones. `drag_files` performs a real OLE drag-and-drop for drop zones that
+  have no file input and refuse a paste.
+- `file_dialog_set` reports a Save dialog's overwrite-confirm prompt as
+  `follow_up_dialogs` rather than answering it. Answering is destructive and
+  belongs to the agent that can read the screen. It watches the specific dialog
+  HWND it filled, so focus moving to that prompt is never mistaken for success.
+- `allow_new` on `file_dialog_set`, required for Save dialogs, whose whole
+  purpose is naming a file that does not exist yet. The flag is explicit rather
+  than inferred from whether the path exists: inferring Save from a missing path
+  would turn a caller's typo into a created file.
+- `clipboard_set_files` publishes `CFSTR_PREFERREDDROPEFFECT` as
+  `DROPEFFECT_COPY` alongside the file list. Without it Explorer treats a pasted
+  list as a move and the source file disappears from its original location.
+- `ErrorCode::InvalidArgument`, plus `FileNotFound`, `DialogNotFound`,
+  `DialogStillOpen`, `DragFailed` and `HelperSpawnFailed`. A malformed argument
+  no longer reports as `Internal`, which told a caller the daemon had broken
+  when the caller's own request was wrong.
+
+### Notes
+- `drag_files` runs its drag source in a de-elevated child process. OLE reverses
+  the direction of the data flow — the drop target calls back into the source's
+  `IDataObject` — and a medium-integrity browser cannot make that call into the
+  High-integrity daemon, which is the same reason a file cannot be dragged from
+  an elevated Explorer into a normal application. The child borrows the shell's
+  token rather than lowering the daemon's own integrity label, because lowering
+  the label leaves the child holding an enabled Administrators SID while the
+  shell token yields the ordinary user token. Its integrity level is verified
+  before it is used.
+- `CreateProcessWithTokenW` needs `TOKEN_ADJUST_DEFAULT` and
+  `TOKEN_ADJUST_SESSIONID` beyond the three rights its documentation lists,
+  because the Secondary Logon service re-duplicates the token and stamps the
+  target session onto it. Measured, not documented.
+- A drag source must implement `EnumFormatEtc`. Explorer enumerates a source
+  before deciding on an effect and settles on `DROPEFFECT_NONE` if enumeration
+  returns `E_NOTIMPL`, without ever fetching the format `QueryGetData` reported
+  as available.
+- `clipboard_set_files` and `drag_files` are permission-gated at the Confirmed
+  tier. `file_dialog_set` is not: it types into a dialog the caller's own agent
+  just caused to open.
+
+## 2.4.1 — 2026-08-22
+
+### Fixed
+- `type` defaults to the rated path, so characters are no longer lost on
+  controls that debounce or drop input under the unrestricted-rate send.
+
 ## 2.4.0 — 2026-08-22
 
 ### Fixed

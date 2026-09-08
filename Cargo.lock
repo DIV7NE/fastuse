@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-cli"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-core"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "fastuse-proto",
  "serde",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-daemon"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-mcp"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-proto"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "postcard",
  "schemars",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "fastuse-win"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "base64",
  "dashmap",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
